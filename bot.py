@@ -559,7 +559,7 @@ def _mark_paid_and_deliver(out_trade_no: str, conn_override=None, cur_override=N
     prod_row = _cur.execute(
         """
 SELECT
-    COALESCE(t.tg_group_id, p.tg_group_id, ''),
+    COALESCE(NULLIF(t.tg_group_id, ''), NULLIF(p.tg_group_id, ''), ''),
     p.name,
     COALESCE(t.deliver_type, p.deliver_type, 'join_group'),
     COALESCE(t.card_fixed, p.card_fixed, ''),
@@ -724,12 +724,26 @@ WHERE p.id=?
 
     async def create_invite_and_notify():
         try:
+            target_group_id = str(group_id or "").strip()
+            if not target_group_id:
+                await application.bot.send_message(
+                    ADMIN_ID,
+                    text=(
+                        f"[配置错误] 订单 {out_trade_no} 无法生成邀请链接：商品/档位未配置群ID。\n"
+                        f"商品ID：{pid}\n"
+                        f"档位ID：{tier_id or '-'}\n"
+                        "请在后台为该商品或档位设置正确的群ID。"
+                    )
+                )
+                await _send_text(uid, f"✅ {t('status.paid', lang)}：{name}\n系统暂未配置入群信息，已通知管理员处理。")
+                return
+
             expire_at = int(time.time()) + 3600
             last_err = None
             for attempt in range(3):
                 try:
                     link_obj = await application.bot.create_chat_invite_link(
-                        chat_id=group_id,
+                        chat_id=target_group_id,
                         expire_date=expire_at,
                         member_limit=1,
                     )
@@ -743,7 +757,7 @@ WHERE p.id=?
             invite_link = link_obj.invite_link
             _cur.execute(
                 "INSERT INTO invites (order_id, user_id, group_id, invite_link, create_time, expire_time, revoked) VALUES (?,?,?,?,?,?,0)",
-                (oid, uid, str(group_id), invite_link, int(time.time()), expire_at),
+                (oid, uid, target_group_id, invite_link, int(time.time()), expire_at),
             )
             _conn.commit()
             msg = (

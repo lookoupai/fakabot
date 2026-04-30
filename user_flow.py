@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import asyncio
 import os
 import secrets
 import time
@@ -650,123 +649,21 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         except Exception as e:
             return False, None, str(e)
 
-    async def _preload_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, tier_id: str | None, channel: str):
-        """后台预加载支付订单（不显示给用户）"""
-        try:
-            # 生成订单但不发送消息
-            row = _get_tier_context(pid, tier_id)
-            if not row:
-                return
-            name, _detail, cover, tier_id, tier_name, price = row
-            subject = _payment_subject(name, tier_name)
-            
-            # 人民币通道最小金额前置校验
-            try:
-                rmb_channels = {"alipay", "wxpay"}
-                pval = float(price)
-                if channel in rmb_channels and pval < 3.0:
-                    return
-            except Exception:
-                pass
-            
-            # 生成订单号
-            def _rand36(k: int) -> str:
-                chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                return "".join(secrets.choice(chars) for _ in range(max(1, int(k))))
-            
-            def _new_out_trade_no() -> str:
-                prefix = _rand36(6)
-                num = str(secrets.randbelow(100000)).zfill(5)
-                return f"{prefix}-{num}"
-            
-            for _ in range(5):
-                cand = _new_out_trade_no()
-                try:
-                    exists = cur.execute("SELECT 1 FROM orders WHERE out_trade_no=? LIMIT 1", (cand,)).fetchone()
-                except Exception:
-                    exists = None
-                if not exists:
-                    out_trade_no = cand
-                    break
-            else:
-                out_trade_no = f"{_rand36(6)}-{str(int(time.time()))[-5:]}"
-            
-            # 创建支付链接
-            ok, pay_url, err = create_payment(channel, subject, price, out_trade_no)
-            if ok:
-                # ✅ 修复：立即保存到数据库，避免支付回调时找不到订单
-                try:
-                    cur.execute(
-                        "INSERT INTO orders (user_id, product_id, tier_id, amount, payment_method, out_trade_no, create_time) VALUES (?,?,?,?,?,?,?)",
-                        (update.effective_user.id, pid, tier_id, price, channel, out_trade_no, int(time.time())),
-                    )
-                    conn.commit()
-                    
-                    # 取消其他待支付订单
-                    try:
-                        cur.execute(
-                            "UPDATE orders SET status='cancelled' WHERE user_id=? AND status='pending' AND out_trade_no<>?",
-                            (update.effective_user.id, out_trade_no),
-                        )
-                        conn.commit()
-                    except Exception:
-                        pass
-                    
-                    # 保存到用户数据中，供后续显示使用
-                    ctx.user_data["preloaded_order"] = {
-                        "out_trade_no": out_trade_no,
-                        "pay_url": pay_url,
-                        "name": subject,
-                        "price": price,
-                        "cover": cover,
-                        "channel": channel,
-                        "pid": pid,
-                        "tier_id": str(tier_id) if tier_id is not None else None,
-                    }
-                    print(f"✅ 订单预加载成功并已保存到数据库: {out_trade_no}")
-                except Exception as e:
-                    print(f"❌ 订单保存到数据库失败: {e}")
-                    # 保存失败则不设置预加载数据，让后续重新创建
-                    return
-        except Exception as e:
-            print(f"❌ 订单预加载失败: {e}")
+    def _payment_announcement_text(channel: str, lang: str) -> str:
+        """读取当前支付方式的公告文本；关闭公告时返回空字符串。"""
+        announcement_enabled = _get_setting(f"announcement.{channel}.enabled", "true") == "true"
+        if not announcement_enabled:
+            return ""
 
-    async def cb_payment_announcement_ack(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """用户确认支付公告后，继续生成支付链接"""
-        query = update.callback_query
-        lang = _lang(update)
-        try:
-            await query.answer(t("payment.acknowledged", lang))
-        except Exception:
-            pass
-        
-        # 从callback_data中获取商品ID和支付渠道
-        parts = query.data.split(":")
-        if len(parts) >= 4:
-            _, pid, tier_id, channel = parts[:4]
+        is_usdt = channel in ["usdt", "usdt_token188", "usdt_lemon"]
+        if is_usdt:
+            custom_announcement = (_get_setting("announcement.usdt.text", "")).strip()
+            default_announcement = t("announcement.usdt_default", lang)
         else:
-            _, pid, channel = parts
-            tier_id = None
-        tier_ctx = _get_tier_context(pid, tier_id)
-        if tier_ctx:
-            tier_id = tier_ctx[3]
-        
-        # 检查是否有预加载的订单
-        preloaded = ctx.user_data.get("preloaded_order")
-        if preloaded and preloaded.get("pid") == pid and preloaded.get("channel") == channel and str(preloaded.get("tier_id")) == str(tier_id):
-            # ✅ 修复：预加载订单已经在数据库中，直接显示即可
-            print(f"⚡ 使用预加载订单（已在数据库）: {preloaded['out_trade_no']}")
-            
-            # 显示订单（复用 _create_payment_order 中的显示逻辑）
-            await _create_payment_order(update, ctx, pid, tier_id, channel, use_preloaded=preloaded)
-            
-            # 清理预加载数据
-            ctx.user_data.pop("preloaded_order", None)
-            ctx.user_data.pop("pending_payment", None)
-        else:
-            # 预加载失败或数据不匹配，重新创建订单
-            print("⚠️ 预加载订单不可用，重新创建")
-            await _create_payment_order(update, ctx, pid, tier_id, channel)
+            custom_announcement = (_get_setting("announcement.alipay_wxpay.text", "")).strip()
+            default_announcement = t("announcement.rmb_default", lang)
+
+        return (custom_announcement or default_announcement or "").strip()
 
     @rate_limit_user_payment
     async def cb_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -786,51 +683,10 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         if tier_ctx:
             tier_id = tier_ctx[3]
         
-        # 检查该支付方式是否启用公告
-        announcement_enabled = _get_setting(f"announcement.{channel}.enabled", "true") == "true"
-        
-        if announcement_enabled:
-            # 根据支付方式获取对应的公告内容
-            is_usdt = channel in ["usdt", "usdt_token188", "usdt_lemon"]
-            
-            # 获取自定义公告
-            if is_usdt:
-                custom_announcement = (_get_setting("announcement.usdt.text", "")).strip()
-            else:
-                custom_announcement = (_get_setting("announcement.alipay_wxpay.text", "")).strip()
-            
-            if custom_announcement:
-                payment_announcement = custom_announcement
-            else:
-                # 根据支付方式显示不同的默认公告
-                if is_usdt:
-                    payment_announcement = t("announcement.usdt_default", lang)
-                else:
-                    payment_announcement = t("announcement.rmb_default", lang)
-            
-            # 保存支付信息到用户数据，用于后续处理
-            ctx.user_data["pending_payment"] = {"pid": pid, "tier_id": str(tier_id) if tier_id is not None else None, "channel": channel}
-            
-            # 后台异步开始生成订单（不等待完成）
-            asyncio.create_task(_preload_payment_order(update, ctx, pid, tier_id, channel))
-            
-            ack_cb = f"pay_ack:{pid}:{tier_id}:{channel}" if tier_id else f"pay_ack:{pid}:{channel}"
-            kb = make_markup([[InlineKeyboardButton(t("payment.ack_button", lang), callback_data=ack_cb)]])
-            
-            try:
-                await _delete_last_and_send_text(
-                    update.effective_chat.id,
-                    payment_announcement,
-                    reply_markup=kb
-                )
-            except Exception:
-                pass
-            return
-        
-        # 公告未启用，直接创建订单
-        await _create_payment_order(update, ctx, pid, tier_id, channel)
+        payment_notice = _payment_announcement_text(channel, lang)
+        await _create_payment_order(update, ctx, pid, tier_id, channel, payment_notice=payment_notice)
 
-    async def _create_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, tier_id: str | None, channel: str, use_preloaded: dict = None):
+    async def _create_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, tier_id: str | None, channel: str, use_preloaded: dict = None, payment_notice: str = ""):
         """创建支付订单的核心逻辑"""
         lang = _lang(update)
         row = _get_tier_context(pid, tier_id)
@@ -946,6 +802,10 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 recheck_label=t("payment.recheck_button", lang),
                 cancel_label=t("payment.cancel_button", lang),
             ))
+        def _with_payment_notice(text: str) -> str:
+            notice = (payment_notice or "").strip()
+            return f"{notice}\n\n{text}" if notice else text
+
         kb = _build_pay_kb(pid, out_trade_no)
         
         # 检查是否为TOKEN188 USDT支付
@@ -983,7 +843,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                     token188_config = PAYCFG.get("usdt_token188", {})
                     usdt_address = token188_config.get("monitor_address", "")
                     
-                    caption = (
+                    caption = _with_payment_notice(
                         f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
                         f"{t('payment.product_name', lang, subject=subject)}\n"
                         f"{t('payment.product_detail', lang, detail=detail)}\n"
@@ -1010,7 +870,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             token188_config = PAYCFG.get("usdt_token188", {})
             usdt_address = token188_config.get("monitor_address", "")
             
-            caption = (
+            caption = _with_payment_notice(
                 f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
                 f"{t('payment.product_name', lang, subject=subject)}\n"
                 f"{t('payment.product_detail', lang, detail=detail)}\n"
@@ -1047,7 +907,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 await _delete_last_and_send_photo(
                     update.effective_chat.id,
                     InputFile(bio),
-                    caption=(
+                    caption=_with_payment_notice(
                         t(
                             "payment.qr_caption",
                             lang,
@@ -1063,7 +923,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 timeout_seconds = get_payment_timeout_seconds(channel)
                 mins = max(1, timeout_seconds // 60)
                 
-                caption = (
+                caption = _with_payment_notice(
                     f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
                     f"{t('payment.product_name', lang, subject=subject)}\n"
                     f"{t('payment.product_detail', lang, detail=detail)}\n"
@@ -1563,7 +1423,6 @@ WHERE o.id=?
     application.add_handler(CallbackQueryHandler(cb_detail, pattern=r"^detail:"))
     application.add_handler(CallbackQueryHandler(cb_support, pattern=r"^support$"))
     application.add_handler(CallbackQueryHandler(cb_buy, pattern=r"^buy:"))
-    application.add_handler(CallbackQueryHandler(cb_payment_announcement_ack, pattern=r"^pay_ack:"))
     application.add_handler(CallbackQueryHandler(cb_pay, pattern=r"^pay:"))
     application.add_handler(CallbackQueryHandler(cb_cancel, pattern=r"^cancel:"))
     application.add_handler(CallbackQueryHandler(cb_ask_leave, pattern=r"^ask:(cancel|back):"))

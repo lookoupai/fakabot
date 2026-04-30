@@ -97,9 +97,7 @@ fakabot/
 
 **关键函数**：
 - `cb_pay()` - 支付方式选择
-- `_preload_payment_order()` - 预加载订单
 - `_create_payment_order()` - 创建支付订单
-- `cb_payment_announcement_ack()` - 支付公告确认
 - `cb_order_list()` - 订单列表
 
 ---

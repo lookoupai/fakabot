@@ -1274,9 +1274,8 @@ WHERE t.product_id=? AND t.id=?
                 f"{status_text}"
                 "💡 提示：\n"
                 "• USDT和支付宝/微信使用不同的公告内容\n"
-                "• 用户选择支付方式时会显示对应公告\n"
-                "• 点击【我知道了，继续支付】后显示付款链接\n"
-                "• 后台会并行加载付款链接，减少等待时间"
+                "• 用户选择支付方式后会直接进入付款台\n"
+                "• 公告内容会合并展示在付款台说明中"
             )
             await _send_text(update.effective_chat.id, text, reply_markup=kb)
             return
