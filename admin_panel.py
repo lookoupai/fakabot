@@ -90,6 +90,37 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         except Exception:
             return str(value)
 
+    def _ensure_i18n_tables():
+        try:
+            cur.execute(
+                """
+CREATE TABLE IF NOT EXISTS product_translations (
+    product_id INTEGER NOT NULL,
+    locale TEXT NOT NULL,
+    name TEXT,
+    full_description TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(product_id, locale)
+)
+"""
+            )
+            cur.execute(
+                """
+CREATE TABLE IF NOT EXISTS product_tier_translations (
+    tier_id INTEGER NOT NULL,
+    locale TEXT NOT NULL,
+    name TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(tier_id, locale)
+)
+"""
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+    _ensure_i18n_tables()
+
     def _get_product_translation(pid: str, locale: str = "en"):
         try:
             return cur.execute(
@@ -1021,15 +1052,6 @@ WHERE t.product_id=? AND t.id=?
             await _send_tiers_page(update.effective_chat.id, pid)
             return
 
-        if action == "tier_edit_i18n_name":
-            if len(parts) < 4:
-                await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
-                return
-            pid, tid = parts[2], parts[3]
-            ctx.user_data["adm_wait"] = {"type": "tier_i18n_name", "data": {"pid": pid, "tid": tid}}
-            await _send_text(update.effective_chat.id, "请输入该档位的【英文名称】：", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
-            return
-
         if action.startswith("tier_edit_"):
             if len(parts) < 4:
                 await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
@@ -1730,21 +1752,6 @@ WHERE t.product_id=? AND t.id=?
             ctx.user_data.pop("adm_wait", None)
             await _send_text(update.effective_chat.id, "✅ 新商品已创建，返回商品页…", reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
             await _send_product_page(update.effective_chat.id, str(pid))
-            return
-
-        # 编辑商品英文翻译 - 启动等待态
-        if action.startswith("edit_i18n_"):
-            field = action.replace("edit_i18n_", "", 1)
-            pid = parts[2]
-            prompts = {
-                "name": "请输入该商品的【英文名称】：",
-                "desc": "请输入该商品的【英文详情】：",
-            }
-            if field not in prompts:
-                await _send_text(update.effective_chat.id, "不支持的字段", reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
-                return
-            ctx.user_data["adm_wait"] = {"type": f"product_i18n_{field}", "data": {"pid": pid}}
-            await _send_text(update.effective_chat.id, prompts[field], reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
             return
 
         # 编辑商品字段 - 启动等待态
