@@ -224,11 +224,18 @@ def build_payment_rows(
     """
     # 如果有get_setting_func，使用管理员设置的排序
     if get_setting_func:
-        order_str = get_setting_func("payment.order", "alipay,wxpay,usdt_lemon,usdt_token188")
-        payment_order = order_str.split(",")
+        order_str = get_setting_func("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+        payment_order = [ch for ch in order_str.split(",") if ch]
+        for ch in paycfg:
+            if ch == "usdt":
+                continue
+            if ch not in payment_order:
+                payment_order.append(ch)
         
         items: List[Tuple[int, str, str]] = []
         for i, ch in enumerate(payment_order):
+            if ch == "usdt":
+                continue
             if ch not in paycfg:
                 continue
             cfg = paycfg[ch]
@@ -248,6 +255,8 @@ def build_payment_rows(
         # 回退到原来的priority排序
         items: List[Tuple[int, str, str]] = []
         for ch, cfg in paycfg.items():
+            if ch == "usdt":
+                continue
             # 检查配置文件中的enabled
             if not cfg.get(enabled_key, True):
                 continue
@@ -285,10 +294,17 @@ def get_first_enabled_payment(
     """
     # 如果有get_setting_func，使用管理员设置的排序
     if get_setting_func:
-        order_str = get_setting_func("payment.order", "alipay,wxpay,usdt_lemon,usdt_token188")
-        payment_order = order_str.split(",")
+        order_str = get_setting_func("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+        payment_order = [ch for ch in order_str.split(",") if ch]
+        for ch in paycfg:
+            if ch == "usdt":
+                continue
+            if ch not in payment_order:
+                payment_order.append(ch)
         
         for ch in payment_order:
+            if ch == "usdt":
+                continue
             if ch not in paycfg:
                 continue
             cfg = paycfg[ch]
@@ -307,6 +323,8 @@ def get_first_enabled_payment(
         # 回退到原来的priority排序
         items = []
         for ch, cfg in paycfg.items():
+            if ch == "usdt":
+                continue
             # 检查配置文件中的enabled
             if not cfg.get(enabled_key, True):
                 continue

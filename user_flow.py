@@ -272,6 +272,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             "usdt_token188": 60 * 60,      # TOKEN188支付：60分钟
             "usdt_lemon": 120 * 60,        # 柠檬USDT：120分钟
             "alipay": 10 * 60,             # 支付宝：10分钟
+            "kavip_alipay": 10 * 60,       # KAVIP支付宝：10分钟
             "wxpay": 10 * 60,              # 微信支付：10分钟
         }
         return timeout_config.get(channel, ORDER_TIMEOUT_SECONDS)  # 默认使用配置文件中的值

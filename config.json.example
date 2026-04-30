@@ -20,13 +20,16 @@
       "type": "wxpay",
       "route": "/pay/yipay"
     },
-    "usdt": {
-      "name": "USDT",
-      "merchant_id": "YOUR_MERCHANT_ID",
-      "gateway": "https://your-usdt-gateway.example",
-      "key": "YOUR_API_KEY",
-      "type": "usdt",
-      "route": "/pay/yipay"
+    "kavip_alipay": {
+      "name": "KAVIP支付宝",
+      "enabled": false,
+      "priority": 30,
+      "merchant_id": "YOUR_KAVIP_MERCHANT_ID",
+      "gateway": "https://kavip.biz/submit.php",
+      "api_gateway": "https://kavip.biz/mapi.php",
+      "key": "YOUR_KAVIP_API_KEY",
+      "type": "alipay",
+      "route": "/pay/kavip"
     }
   },
   "START": {

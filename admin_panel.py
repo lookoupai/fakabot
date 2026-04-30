@@ -578,12 +578,18 @@ WHERE t.product_id=? AND t.id=?
             
             # 获取支付方式排序
             def get_payment_order():
-                order_str = _get_setting("payment.order", "alipay,wxpay,usdt_lemon,usdt_token188")
-                return order_str.split(",")
+                allowed_channels = ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]
+                order_str = _get_setting("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+                order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
+                for ch in allowed_channels:
+                    if ch not in order_list:
+                        order_list.append(ch)
+                return order_list
             
             def get_payment_name(channel):
                 names = {
                     "alipay": "支付宝",
+                    "kavip_alipay": "KAVIP支付宝",
                     "wxpay": "微信", 
                     "usdt_lemon": "USDT (柠檬)",
                     "usdt_token188": "USDT(TRC20)"
@@ -594,7 +600,7 @@ WHERE t.product_id=? AND t.id=?
             payment_order = get_payment_order()
             
             for i, channel in enumerate(payment_order):
-                if channel not in ["alipay", "wxpay", "usdt_lemon", "usdt_token188"]:
+                if channel not in ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]:
                     continue
                     
                 name = get_payment_name(channel)
@@ -689,8 +695,12 @@ WHERE t.product_id=? AND t.id=?
             channel = parts[2] if len(parts) > 2 else ""
             if channel:
                 # 获取当前排序
-                order_str = _get_setting("payment.order", "alipay,wxpay,usdt_lemon,usdt_token188")
-                order_list = order_str.split(",")
+                allowed_channels = ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]
+                order_str = _get_setting("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+                order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
+                for ch in allowed_channels:
+                    if ch not in order_list:
+                        order_list.append(ch)
                 
                 # 找到当前位置并上移
                 if channel in order_list:
@@ -723,8 +733,12 @@ WHERE t.product_id=? AND t.id=?
             channel = parts[2] if len(parts) > 2 else ""
             if channel:
                 # 获取当前排序
-                order_str = _get_setting("payment.order", "alipay,wxpay,usdt_lemon,usdt_token188")
-                order_list = order_str.split(",")
+                allowed_channels = ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]
+                order_str = _get_setting("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+                order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
+                for ch in allowed_channels:
+                    if ch not in order_list:
+                        order_list.append(ch)
                 
                 # 找到当前位置并下移
                 if channel in order_list:

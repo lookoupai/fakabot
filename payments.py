@@ -4,6 +4,7 @@
 """
 支付系统核心模块 - 重构版
 - 柠檬支付：使用官方标准对接
+- KAVIP：复用易支付协议
 - TOKEN188 USDT：保持原有逻辑不变
 """
 
@@ -108,7 +109,7 @@ def create_payment(
             )
             return success, result if success else None, None if success else result
         else:
-            # 柠檬支付 (支付宝、微信、USDT柠檬)
+            # 易支付协议通道（柠檬支付、KAVIP等）
             notify_url = f"{domain}/callback"
             return_url = domain
             
@@ -179,7 +180,7 @@ def verify_callback_signature(ch: dict, params: dict) -> bool:
             
             return received_sign.upper() == calculated_sign.upper()
         else:
-            # 柠檬支付签名验证
+            # 易支付协议签名验证
             return verify_lemzf_callback(ch, params)
             
     except Exception as e:
@@ -200,6 +201,6 @@ def md5_sign(params: dict, key: str) -> str:
 if __name__ == "__main__":
     # 测试代码
     print("支付系统模块加载成功")
-    print("- 柠檬支付：支付宝、微信、USDT柠檬")
+    print("- 易支付协议：支付宝、微信、USDT柠檬、KAVIP")
     print("- TOKEN188：USDT(TRC20)")
 

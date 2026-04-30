@@ -13,7 +13,7 @@
 
 ### 🚀 全自动发卡系统 | 支持多种支付方式 | 订单自动处理 | Redis 高性能缓存
 
-💳 支付宝 · 微信 · USDT | 🐳 Docker 一键部署 | ⚡ 性能提升 100 倍
+💳 支付宝 · 微信 · KAVIP支付宝 · USDT | 🐳 Docker 一键部署 | ⚡ 性能提升 100 倍
 
 **适用场景**：知识付费 · 虚拟商品 · 在线课程 · 软件交付 · 会员服务
 
@@ -39,14 +39,14 @@
 
 ### 💳 支付系统
 
-支持 **4 种主流支付方式**，满足不同用户需求：
+支持多种主流支付方式，满足不同用户需求：
 
 | 支付方式 | 特点 | 到账速度 |
 |---------|------|---------|
 | **支付宝** | 当面付、扫码支付 | 实时 |
+| **KAVIP 支付宝** | 易支付协议、独立通道 | 实时 |
 | **微信支付** | Native 支付、扫码 | 实时 |
 | **USDT (TOKEN188)** | TRC20/ERC20、链上验证 | 1-3 分钟 |
-| **USDT ** | 多链支持、低手续费 | 秒级 |
 
 **特性**：
 - ✅ 自动到账确认 · ✅ 支付回调处理 · ✅ 订单状态同步 · ✅ 支付超时处理
@@ -419,7 +419,8 @@ systemctl enable redis
 
 3. **配置支付接口**
    - 支付宝/微信：申请商户号
-   - USDT：注册 TOKEN188 或柠檬支付
+   - KAVIP支付宝：在 KAVIP 后台获取商户ID与密钥
+   - USDT：注册 TOKEN188
 
 4. **编辑配置文件**
 
@@ -448,6 +449,16 @@ vim config.json
       "mch_id": "你的商户号",
       "api_key": "你的API密钥"
     },
+    "kavip_alipay": {
+      "name": "KAVIP支付宝",
+      "enabled": true,
+      "merchant_id": "你的KAVIP商户ID",
+      "gateway": "https://kavip.biz/submit.php",
+      "api_gateway": "https://kavip.biz/mapi.php",
+      "key": "你的KAVIP商户密钥",
+      "type": "alipay",
+      "route": "/pay/kavip"
+    },
     "usdt_token188": {
       "enabled": true,
       "api_key": "你的API Key",
@@ -462,6 +473,8 @@ vim config.json
   }
 }
 ```
+
+KAVIP 后台通知地址请配置为 `https://你的域名.com/callback`，同步跳转地址可配置为 `https://你的域名.com`。系统收到异步通知并验签通过后，会自动把订单标记为已支付并发货。
 
 **第 5 步：启动机器人**
 
@@ -609,6 +622,7 @@ systemctl status fakabot
 ```
 💳 请选择支付方式：
 - 支付宝
+- KAVIP支付宝
 - 微信支付
 - USDT
 ```
@@ -944,7 +958,7 @@ A: 最低 1核1GB，推荐 1核2GB。月费约 $5-10。
 A: 不是必须的，但强烈推荐。域名可以配置 SSL，更安全。
 
 **Q: 支持哪些支付方式？**  
-A: 机器人支持支付宝、微信、USDT (TOKEN188)、USDT (柠檬支付)。
+A: 机器人支持支付宝、KAVIP支付宝、微信、USDT (TOKEN188)。
 
 **Q: 可以自定义界面吗？**  
 A: 可以，修改配置文件中的文案和按钮即可。
