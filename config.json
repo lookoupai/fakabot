@@ -6,9 +6,9 @@
   "PAYMENTS": {
     "alipay": {
       "name": "支付宝",
-      "merchant_id": "YOUR_MERCHANT_ID",
+      "merchant_id": "1023",
       "gateway": "https://your-gateway.example/submit.php",
-      "key": "YOUR_API_KEY",
+      "key": "76F67wdDD7p56l7g1F66wFTRLv7pd5rv",
       "type": "alipay",
       "route": "/pay/yipay"
     },
