@@ -18,6 +18,7 @@ import hashlib
 from admin_panel import register_admin_handlers
 from user_flow import register_user_handlers
 from utils import ensure_settings_table, get_setting, set_setting
+from i18n import DEFAULT_LANGUAGE, normalize_language, t
 
 # Redis缓存和频率限制
 try:
@@ -102,6 +103,43 @@ def _set_setting(key: str, value: str):
         set_setting(cur, conn, key, value)
     except Exception:
         pass
+
+def _user_lang(user_id: int) -> str:
+    try:
+        row = cur.execute("SELECT language FROM user_preferences WHERE user_id=?", (int(user_id),)).fetchone()
+        if row and row[0]:
+            return normalize_language(row[0])
+    except Exception:
+        pass
+    return DEFAULT_LANGUAGE
+
+def _product_text(pid: int, lang: str, field: str, fallback: str = "") -> str:
+    if normalize_language(lang) == "zh":
+        return fallback or ""
+    col = "name" if field == "name" else "full_description"
+    try:
+        row = cur.execute(f"SELECT {col} FROM product_translations WHERE product_id=? AND locale=?", (int(pid), normalize_language(lang))).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:
+        pass
+    return fallback or ""
+
+def _tier_text(tid: int | None, lang: str, fallback: str = "") -> str:
+    if not tid or normalize_language(lang) == "zh":
+        return fallback or ""
+    try:
+        row = cur.execute("SELECT name FROM product_tier_translations WHERE tier_id=? AND locale=?", (int(tid), normalize_language(lang))).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:
+        pass
+    return fallback or ""
+
+def _localized_subject(pid: int, tid: int | None, product_name: str, tier_name: str | None, lang: str) -> str:
+    product_label = _product_text(pid, lang, "name", product_name)
+    tier_label = _tier_text(tid, lang, tier_name or "")
+    return f"{product_label} - {tier_label}" if tier_label else product_label
 
 def _bootstrap_home_from_cfg_if_empty():
     title = _get_setting("home.title", "")
@@ -245,6 +283,44 @@ except Exception:
     pass
 try:
     cur.execute("UPDATE products SET status='on' WHERE status IS NULL")
+    conn.commit()
+except Exception:
+    pass
+try:
+    cur.execute(
+        """
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id INTEGER PRIMARY KEY,
+    language TEXT NOT NULL DEFAULT 'zh',
+    updated_at INTEGER NOT NULL
+)
+"""
+    )
+    cur.execute(
+        """
+CREATE TABLE IF NOT EXISTS product_translations (
+    product_id INTEGER NOT NULL,
+    locale TEXT NOT NULL,
+    name TEXT,
+    full_description TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(product_id, locale)
+)
+"""
+    )
+    cur.execute(
+        """
+CREATE TABLE IF NOT EXISTS product_tier_translations (
+    tier_id INTEGER NOT NULL,
+    locale TEXT NOT NULL,
+    name TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(tier_id, locale)
+)
+"""
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_product_translations_locale ON product_translations(locale, product_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_product_tier_translations_locale ON product_tier_translations(locale, tier_id)")
     conn.commit()
 except Exception:
     pass
@@ -507,7 +583,7 @@ WHERE p.id=?
             try:
                 await application.bot.send_message(
                     uid,
-                    text="支付成功，但商品配置暂时缺失，管理员将尽快处理，请稍候。"
+                    text=t("payment.create_failed", _user_lang(uid), error="商品配置暂时缺失，管理员将尽快处理")
                 )
             except Exception:
                 pass
@@ -523,7 +599,8 @@ WHERE p.id=?
             pass
         return
     group_id, product_name, deliver_type, card_fixed, tier_name = prod_row
-    name = f"{product_name} - {tier_name}" if tier_name else product_name
+    lang = _user_lang(uid)
+    name = _localized_subject(pid, tier_id, product_name, tier_name, lang)
 
     # Branch by deliver_type
     dt = (deliver_type or 'join_group').strip().lower()
@@ -547,7 +624,7 @@ WHERE p.id=?
                 if dt == 'card_fixed':
                     card_text = (card_fixed or '').strip()
                     if not card_text:
-                        await _send_text(uid, f"支付成功：{name}\n管理员尚未配置通用卡密，请稍后。")
+                        await _send_text(uid, f"✅ {t('status.paid', lang)}：{name}\n管理员尚未配置通用卡密，请稍后。")
                         try:
                             await application.bot.send_message(ADMIN_ID, f"[缺货/未配置] 订单 {out_trade_no} 商品({pid}) 为通用卡密发货，但未配置 card_fixed。")
                         except Exception:
@@ -587,7 +664,7 @@ WHERE p.id=?
                                 pass
                             await asyncio.sleep(0.05)
                     if not success or not card_text:
-                        await _send_text(uid, f"支付成功：{name}\n但当前卡密库存不足，已通知管理员补充，请稍候。")
+                        await _send_text(uid, f"✅ {t('status.paid', lang)}：{name}\n但当前卡密库存不足，已通知管理员补充，请稍候。")
                         try:
                             await application.bot.send_message(ADMIN_ID, f"[缺货] 订单 {out_trade_no} 商品({pid}) 无可用卡密。")
                         except Exception:
@@ -596,7 +673,7 @@ WHERE p.id=?
 
                 # Send card to user
                 msg = (
-                    f"✅ 支付成功：{name}\n"
+                    f"✅ {t('status.paid', lang)}：{name}\n"
                     f"🔐 您的卡密：\n{card_text}\n\n"
                     f"请妥善保管。"
                 )
@@ -670,7 +747,7 @@ WHERE p.id=?
             )
             _conn.commit()
             msg = (
-                f"✅ 支付成功：{name}\n"
+                f"✅ {t('status.paid', lang)}：{name}\n"
                 f"这是您的自动拉群邀请链接（1小时内有效，且仅可使用一次）：\n\n{invite_link}\n\n"
                 f"请尽快点击加入群组。加入成功后我会自动撤销该链接。"
             )
@@ -686,7 +763,7 @@ WHERE p.id=?
                 )
             except Exception:
                 pass
-            await _send_text(uid, f"支付成功：{name}\n系统生成邀请链接失败，请稍后重试或等待管理员手工处理。")
+            await _send_text(uid, f"✅ {t('status.paid', lang)}：{name}\n系统生成邀请链接失败，请稍后重试或等待管理员手工处理。")
 
     try:
         try:

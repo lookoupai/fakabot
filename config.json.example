@@ -35,7 +35,9 @@
   "START": {
     "cover_url": "https://img.example/start-cover.jpg",
     "title": "欢迎选购",
-    "intro": "这里是商店简介或活动文案，可在 config.json 的 START 中自定义。"
+    "intro": "这里是商店简介或活动文案，可在 config.json 的 START 中自定义。",
+    "title_en": "Welcome",
+    "intro_en": "This is your store intro or promotion text."
   },
   "SHOW_QR": true,
   "PRODUCTS": [

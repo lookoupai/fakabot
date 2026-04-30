@@ -19,6 +19,7 @@ from utils import notify_admin
 from utils import build_payment_rows, get_first_enabled_payment, row_back, make_markup, rows_pay_console, build_confirm_rows
 from utils import STATUS_ZH
 from screenshot_utils import get_payment_screenshot
+from i18n import DEFAULT_LANGUAGE, normalize_language, t
 
 # Redis缓存和频率限制
 try:
@@ -282,6 +283,81 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
     # 简单的本地限流（按订单号）
     _recheck_cooldown: Dict[str, float] = {}
 
+    def _user_lang(user_id: int | None) -> str:
+        try:
+            row = cur.execute("SELECT language FROM user_preferences WHERE user_id=?", (int(user_id),)).fetchone()
+            if row and row[0]:
+                return normalize_language(row[0])
+        except Exception:
+            pass
+        return DEFAULT_LANGUAGE
+
+    def _set_user_lang(user_id: int, language: str):
+        lang = normalize_language(language)
+        try:
+            cur.execute(
+                "INSERT INTO user_preferences(user_id, language, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET language=excluded.language, updated_at=excluded.updated_at",
+                (int(user_id), lang, int(time.time())),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return lang
+
+    def _lang(update: Update) -> str:
+        uid = getattr(getattr(update, "effective_user", None), "id", None)
+        return _user_lang(uid)
+
+    def _back(callback_data: str, lang: str):
+        return row_back(callback_data, t("common.back", lang))
+
+    def _product_text(pid: int | str, lang: str, field: str, fallback: str = "") -> str:
+        if normalize_language(lang) == "zh":
+            return fallback or ""
+        col = "name" if field == "name" else "full_description"
+        try:
+            row = cur.execute(
+                f"SELECT {col} FROM product_translations WHERE product_id=? AND locale=?",
+                (int(pid), normalize_language(lang)),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:
+            pass
+        return fallback or ""
+
+    def _tier_text(tid: int | str | None, lang: str, fallback: str = "") -> str:
+        if not tid or normalize_language(lang) == "zh":
+            return fallback or ""
+        try:
+            row = cur.execute(
+                "SELECT name FROM product_tier_translations WHERE tier_id=? AND locale=?",
+                (int(tid), normalize_language(lang)),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:
+            pass
+        return fallback or ""
+
+    def _localized_subject(pid: str, tid: str | None, product_name: str, tier_name: str | None, lang: str) -> str:
+        return _payment_subject(_product_text(pid, lang, "name", product_name), _tier_text(tid, lang, tier_name or ""))
+
+    async def _render_home_for(update: Update, lang: str | None = None):
+        selected = normalize_language(lang or _lang(update))
+        await render_home(
+            update.effective_chat.id,
+            cur,
+            START_CFG,
+            _get_setting,
+            _delete_last_and_send_photo,
+            _delete_last_and_send_text,
+            language=selected,
+            get_product_text=_product_text,
+            show_language_switch=True,
+        )
+
     def _fmt_price(value) -> str:
         try:
             num = float(value)
@@ -346,14 +422,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
 
     async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # 直接显示主页
-        await render_home(
-            update.effective_chat.id,
-            cur,
-            START_CFG,
-            _get_setting,
-            _delete_last_and_send_photo,
-            _delete_last_and_send_text,
-        )
+        await _render_home_for(update)
 
     async def cb_show_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -361,26 +430,31 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             await query.answer()
         except Exception:
             pass
-        await render_home(
-            update.effective_chat.id,
-            cur,
-            START_CFG,
-            _get_setting,
-            _delete_last_and_send_photo,
-            _delete_last_and_send_text,
-        )
+        await _render_home_for(update)
+
+    async def cb_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        parts = (query.data or "").split(":")
+        lang = normalize_language(parts[1] if len(parts) > 1 else DEFAULT_LANGUAGE)
+        _set_user_lang(update.effective_user.id, lang)
+        try:
+            await query.answer(t("payment.acknowledged", lang))
+        except Exception:
+            pass
+        await _render_home_for(update, lang)
 
     async def _send_support_info(chat_id: int):
         """统一发送客服信息：支持 @username/URL/数字ID 三种形式，或纯文本。
         行为与原 cb_support/cmd_support 保持一致。
         """
         try:
+            lang = _user_lang(chat_id)
             s = (_get_setting("support.contact", "") or "").strip()
             if not s:
                 await _delete_last_and_send_text(
                     chat_id,
-                    "ℹ️ 暂未配置客服联系方式。",
-                    reply_markup=make_markup([row_back("show:list")]),
+                    t("support.not_configured", lang),
+                    reply_markup=make_markup([_back("show:list", lang)]),
                 )
                 return
             s_lower = s.lower()
@@ -393,20 +467,20 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 url = f"tg://user?id={s}"
             if url:
                 # 追加复用的返回按钮
-                kb = make_markup([[InlineKeyboardButton("💁联系客服", url=url), InlineKeyboardButton("⬅️ 返回", callback_data="show:list")]])
-                await _delete_last_and_send_text(chat_id, "🆘 客服\n点击下方按钮", reply_markup=kb)
+                kb = make_markup([[InlineKeyboardButton(t("common.support", lang), url=url), InlineKeyboardButton(t("common.back", lang), callback_data="show:list")]])
+                await _delete_last_and_send_text(chat_id, t("support.title", lang), reply_markup=kb)
             else:
                 await _delete_last_and_send_text(
                     chat_id,
-                    f"🆘 客服联系方式：\n{s}",
-                    reply_markup=make_markup([row_back("show:list")]),
+                    t("support.contact", lang, contact=s),
+                    reply_markup=make_markup([_back("show:list", lang)]),
                 )
         except Exception:
             try:
                 await _delete_last_and_send_text(
                     chat_id,
-                    "❗ 获取客服信息失败，请稍后重试。",
-                    reply_markup=make_markup([row_back("show:list")]),
+                    t("support.failed", _user_lang(chat_id)),
+                    reply_markup=make_markup([_back("show:list", _user_lang(chat_id))]),
                 )
             except Exception:
                 pass
@@ -414,6 +488,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
     async def cb_detail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
+        lang = _lang(update)
         _, pid = query.data.split(":")
         row = cur.execute(
             "SELECT name, full_description, cover_url FROM products WHERE id=? AND status='on'",
@@ -423,8 +498,8 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             try:
                 await _delete_last_and_send_text(
                     update.effective_chat.id,
-                    "⚠️ 商品不存在或已下架",
-                    reply_markup=make_markup([row_back("show:list")])
+                    t("product.unavailable", lang),
+                    reply_markup=make_markup([_back("show:list", lang)])
                 )
             except Exception:
                 pass
@@ -436,14 +511,22 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         rows = []
         if tiers:
             for tid, tier_name, tier_price, _dt in tiers:
-                tier_lines.append(f"- {tier_name}：¥{_fmt_price(tier_price)}")
-                rows.append([InlineKeyboardButton(f"{tier_name} ¥{_fmt_price(tier_price)}", callback_data=f"buy:{pid}:{tid}")])
+                tier_label = _tier_text(tid, lang, tier_name)
+                tier_lines.append(f"- {tier_label}：¥{_fmt_price(tier_price)}")
+                rows.append([InlineKeyboardButton(f"{tier_label} ¥{_fmt_price(tier_price)}", callback_data=f"buy:{pid}:{tid}")])
         else:
-            rows.append([InlineKeyboardButton("🛒 购买", callback_data=f"buy:{pid}")])
-        rows.append(row_back("show:list"))
+            rows.append([InlineKeyboardButton(t("common.buy", lang), callback_data=f"buy:{pid}")])
+        rows.append(_back("show:list", lang))
         kb = InlineKeyboardMarkup(rows)
-        price_text = "\n".join(tier_lines) if tier_lines else "暂无可购买档位"
-        caption = f" {name}\n\n{full_desc}\n\n💰 价格档位：\n{price_text}"
+        price_text = "\n".join(tier_lines) if tier_lines else t("product.no_tiers", lang)
+        caption = t(
+            "product.detail_caption",
+            lang,
+            name=_product_text(pid, lang, "name", name),
+            description=_product_text(pid, lang, "full_description", full_desc or ""),
+            price_title=t("product.price_tiers", lang),
+            price_text=price_text,
+        )
         try:
             await query.edit_message_media(
                 media=InputMediaPhoto(media=img, caption=caption), reply_markup=kb
@@ -473,6 +556,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
     async def cb_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
+        lang = _lang(update)
         parts = query.data.split(":")
         pid = parts[1]
         tier_id = parts[2] if len(parts) > 2 else None
@@ -481,14 +565,14 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             try:
                 await _delete_last_and_send_text(
                     update.effective_chat.id,
-                    "⚠️ 商品不存在或已下架",
-                    reply_markup=make_markup([row_back("show:list")])
+                    t("product.unavailable", lang),
+                    reply_markup=make_markup([_back("show:list", lang)])
                 )
             except Exception:
                 pass
             return
         name, _full_desc, cover, tier_id, tier_name, price = row
-        subject = _payment_subject(name, tier_name)
+        subject = _localized_subject(pid, tier_id, name, tier_name, lang)
         # 读取后台配置的列数：settings(ui.payment_cols) -> START_CFG.payment_cols -> 默认3；限定 1~4 列
         try:
             cols_raw = _get_setting("ui.payment_cols", (START_CFG.get("payment_cols") or 3))
@@ -522,8 +606,8 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         
         # 多个支付方式时显示选择界面
         rows = payment_rows
-        rows.append(row_back(f"detail:{pid}"))
-        caption = f"商品：{subject}\n价格：¥{_fmt_price(price)}\n💳 请选择支付方式："
+        rows.append(_back(f"detail:{pid}", lang))
+        caption = t("payment.choose_method", lang, subject=subject, price=_fmt_price(price))
         if cover:
             try:
                 await _delete_last_and_send_photo(
@@ -650,8 +734,9 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
     async def cb_payment_announcement_ack(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """用户确认支付公告后，继续生成支付链接"""
         query = update.callback_query
+        lang = _lang(update)
         try:
-            await query.answer("✅ 已确认")
+            await query.answer(t("payment.acknowledged", lang))
         except Exception:
             pass
         
@@ -686,6 +771,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
     @rate_limit_user_payment
     async def cb_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        lang = _lang(update)
         try:
             await query.answer()
         except Exception:
@@ -718,30 +804,9 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             else:
                 # 根据支付方式显示不同的默认公告
                 if is_usdt:
-                    payment_announcement = (
-                        "📢 USDT支付重要提醒\n\n\n"
-                        "⚠️ 请注意手续费问题\n\n"
-                        "🏦 交易所转账（火币/欧易/币安）\n"
-                        "   会扣 1U 手续费\n"
-                        "   商品价格 10U → 请转 11U\n"
-                        "   否则到账不足，无法自动拉群\n\n"
-                        "💳 钱包转账（推荐 ✅）\n"
-                        "   支持 Bitpie / TP / imToken 等钱包\n"
-                        "   直接按商品金额转（例：10U 转 10U）\n"
-                        "   钱包自动扣矿工费，到账准确，更省钱！\n\n"
-                        "⚡️ 付款即发货，1-3分钟快速到账\n"
-                        "   机器人自动拉你进会员群 ✅"
-                    )
+                    payment_announcement = t("announcement.usdt_default", lang)
                 else:
-                    payment_announcement = (
-                        "📢 欢迎光临官方商店\n\n\n"
-                        "💳 微信 / 支付宝付款说明\n\n"
-                        "✅ 按提示金额准确付款即可\n"
-                        "✅ 支持微信扫码、支付宝扫码\n"
-                        "✅ 付款后请勿关闭页面\n\n"
-                        "⚡️ 付款即发货，1-3分钟快速到账\n"
-                        "   机器人自动拉你进会员群 ✅"
-                    )
+                    payment_announcement = t("announcement.rmb_default", lang)
             
             # 保存支付信息到用户数据，用于后续处理
             ctx.user_data["pending_payment"] = {"pid": pid, "tier_id": str(tier_id) if tier_id is not None else None, "channel": channel}
@@ -750,7 +815,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             asyncio.create_task(_preload_payment_order(update, ctx, pid, tier_id, channel))
             
             ack_cb = f"pay_ack:{pid}:{tier_id}:{channel}" if tier_id else f"pay_ack:{pid}:{channel}"
-            kb = make_markup([[InlineKeyboardButton("✅ 我知道了，继续支付", callback_data=ack_cb)]])
+            kb = make_markup([[InlineKeyboardButton(t("payment.ack_button", lang), callback_data=ack_cb)]])
             
             try:
                 await _delete_last_and_send_text(
@@ -767,25 +832,27 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
 
     async def _create_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, tier_id: str | None, channel: str, use_preloaded: dict = None):
         """创建支付订单的核心逻辑"""
+        lang = _lang(update)
         row = _get_tier_context(pid, tier_id)
         if not row:
             try:
                 await _delete_last_and_send_text(
                     update.effective_chat.id,
-                    "⚠️ 商品不存在或已下架",
-                    reply_markup=make_markup([row_back("show:list")])
+                    t("product.unavailable", lang),
+                    reply_markup=make_markup([_back("show:list", lang)])
                 )
             except Exception:
                 pass
             return
         name, detail, cover, tier_id, tier_name, price = row
-        subject = _payment_subject(name, tier_name)
+        subject = _localized_subject(pid, tier_id, name, tier_name, lang)
+        detail = _product_text(pid, lang, "full_description", detail or "")
         
         # 先显示"正在生成"提示，保持用户体验一致
         try:
             await _delete_last_and_send_text(
                 update.effective_chat.id,
-                "⏳ 正在生成付款链接，请稍候…\n请勿重复点击按钮，预计几秒完成。"
+                t("payment.generating", lang)
             )
         except Exception:
             pass
@@ -803,8 +870,8 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 if channel in rmb_channels and pval < 3.0:
                     await _delete_last_and_send_text(
                         update.effective_chat.id,
-                        "❌ 该通道最小支付金额为 3.00 元，请返回重新选择支付方式或购买金额≥3.00 的商品。",
-                        reply_markup=make_markup([row_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}")])
+                        t("payment.min_amount", lang),
+                        reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
                     )
                     return
             except Exception:
@@ -838,8 +905,8 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 try:
                     await _delete_last_and_send_text(
                         update.effective_chat.id,
-                        f"❌ 下单失败：{err}\n请稍后重试，或返回重新选择支付方式。",
-                        reply_markup=make_markup([row_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}")])
+                        t("payment.create_failed", lang, error=err),
+                        reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
                     )
                 except Exception:
                     pass
@@ -869,15 +936,16 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             except Exception as e:
                 print(f"❌ 订单插入检查失败: {e}")
         try:
-            row_desc = cur.execute(
-                "SELECT full_description FROM products WHERE id=?",
-                (pid,),
-            ).fetchone()
-            detail = (row_desc[0]) if (row_desc and row_desc[0]) else ""
+            row_desc = cur.execute("SELECT full_description FROM products WHERE id=?", (pid,)).fetchone()
+            detail = _product_text(pid, lang, "full_description", (row_desc[0]) if (row_desc and row_desc[0]) else "")
         except Exception:
             detail = ""
         def _build_pay_kb(pid_val: str, otn: str) -> InlineKeyboardMarkup:
-            return make_markup(rows_pay_console(otn))
+            return make_markup(rows_pay_console(
+                otn,
+                recheck_label=t("payment.recheck_button", lang),
+                cancel_label=t("payment.cancel_button", lang),
+            ))
         kb = _build_pay_kb(pid, out_trade_no)
         
         # 检查是否为TOKEN188 USDT支付
@@ -916,14 +984,14 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                     usdt_address = token188_config.get("monitor_address", "")
                     
                     caption = (
-                        f"🧾 订单号：{out_trade_no}\n"
-                        f"📦 商品名：{subject}\n"
-                        f"📝 商品详情：{detail}\n"
-                        f"💰 价格：¥{_fmt_price(price)}\n"
-                        f"💳 支付方式：{method_name}\n"
-                        f"📍 USDT钱包地址：`{usdt_address}`\n"
-                        f"⏱️ 订单有效期约 {mins} 分钟，超时将自动取消。\n\n"
-                        f"提示：扫描上方二维码完成USDT支付，支付成功后请返回本聊天等待邀请链接。"
+                        f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
+                        f"{t('payment.product_name', lang, subject=subject)}\n"
+                        f"{t('payment.product_detail', lang, detail=detail)}\n"
+                        f"{t('payment.price', lang, price=_fmt_price(price))}\n"
+                        f"{t('payment.method', lang, method=method_name)}\n"
+                        f"{t('payment.wallet', lang, address=usdt_address)}\n"
+                        f"{t('payment.timeout', lang, minutes=mins)}\n\n"
+                        f"{t('payment.usdt_qr_hint', lang)}"
                     )
                     
                     await _delete_last_and_send_photo(
@@ -943,15 +1011,15 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             usdt_address = token188_config.get("monitor_address", "")
             
             caption = (
-                f"🧾 订单号：{out_trade_no}\n"
-                f"📦 商品名：{subject}\n"
-                f"📝 商品详情：{detail}\n"
-                f"💰 价格：¥{_fmt_price(price)}\n"
-                f"💳 支付方式：{method_name}\n"
-                f"📍 USDT钱包地址：`{usdt_address}`\n"
-                f"🔗 支付链接：{pay_url}\n"
-                f"⏱️ 订单有效期约 {mins} 分钟，超时将自动取消。\n\n"
-                f"提示：点击链接完成USDT支付，支付成功后系统会自动检测并发送邀请链接。"
+                f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
+                f"{t('payment.product_name', lang, subject=subject)}\n"
+                f"{t('payment.product_detail', lang, detail=detail)}\n"
+                f"{t('payment.price', lang, price=_fmt_price(price))}\n"
+                f"{t('payment.method', lang, method=method_name)}\n"
+                f"{t('payment.wallet', lang, address=usdt_address)}\n"
+                f"{t('payment.link', lang, url=pay_url)}\n"
+                f"{t('payment.timeout', lang, minutes=mins)}\n\n"
+                f"{t('payment.usdt_link_hint', lang)}"
             )
             
             if cover:
@@ -980,10 +1048,13 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                     update.effective_chat.id,
                     InputFile(bio),
                     caption=(
-                        f"📷 请扫码支付 ¥{_fmt_price(price)}\n"
-                        f"🧾 订单号：{out_trade_no}\n"
-                        f"⏱️ 订单有效期约 {max(1, get_payment_timeout_seconds(channel) // 60)} 分钟，超时将自动取消。\n"
-                        f"提示：支付成功后我会自动发送自动拉群邀请链接。"
+                        t(
+                            "payment.qr_caption",
+                            lang,
+                            price=_fmt_price(price),
+                            out_trade_no=out_trade_no,
+                            minutes=max(1, get_payment_timeout_seconds(channel) // 60),
+                        )
                     ),
                     reply_markup=kb,
                 )
@@ -993,14 +1064,14 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 mins = max(1, timeout_seconds // 60)
                 
                 caption = (
-                    f"🧾 订单号：{out_trade_no}\n"
-                    f"📦 商品名：{subject}\n"
-                    f"📝 商品详情：{detail}\n"
-                    f"💰 价格：¥{_fmt_price(price)}\n"
-                    f"💳 支付方式：{method_name}\n"
-                    f"🔗 支付链接：{pay_url}\n"
-                    f"⏱️ 订单有效期约 {mins} 分钟，超时将自动取消。\n\n"
-                    f"提示：若链接无法直接打开，可复制到浏览器；完成支付后请返回本聊天等待邀请链接。"
+                    f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
+                    f"{t('payment.product_name', lang, subject=subject)}\n"
+                    f"{t('payment.product_detail', lang, detail=detail)}\n"
+                    f"{t('payment.price', lang, price=_fmt_price(price))}\n"
+                    f"{t('payment.method', lang, method=method_name)}\n"
+                    f"{t('payment.link', lang, url=pay_url)}\n"
+                    f"{t('payment.timeout', lang, minutes=mins)}\n\n"
+                    f"{t('payment.link_hint', lang)}"
                 )
                 if cover:
                     try:
@@ -1018,15 +1089,16 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         # 供后续确认场景恢复键盘使用
         async def _restore_pay_keyboard(msg, pid_val: str, otn: str):
             try:
-                await msg.edit_reply_markup(reply_markup=make_markup(rows_pay_console(otn)))
+                    await msg.edit_reply_markup(reply_markup=_build_pay_kb(pid_val, otn))
             except Exception:
                 try:
-                    await query.edit_message_reply_markup(reply_markup=make_markup(rows_pay_console(otn)))
+                    await query.edit_message_reply_markup(reply_markup=_build_pay_kb(pid_val, otn))
                 except Exception:
                     pass
 
     async def cb_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        lang = _lang(update)
         try:
             await query.answer()
         except Exception:
@@ -1052,13 +1124,14 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             pass
         chat_id = update.effective_chat.id
         try:
-            await send_ephemeral(application.bot, chat_id, "✅ 已取消订单，正在返回商品列表…", ttl=2)
+            await send_ephemeral(application.bot, chat_id, t("payment.cancelled", lang), ttl=2)
         except Exception:
             pass
         await cb_show_list(update, ctx)
 
     async def cb_ask_leave(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        lang = _lang(update)
         try:
             await query.answer()
         except Exception:
@@ -1073,8 +1146,8 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             kb = make_markup(build_confirm_rows(
                 yes_cb=f"confirm:cancel:{otn}:yes",
                 no_cb=f"confirm:cancel:{otn}:no",
-                yes_label="✅ 确定取消",
-                no_label="↩️ 继续付款",
+                yes_label=t("payment.confirm_cancel", lang),
+                no_label=t("payment.continue_pay", lang),
             ))
             try:
                 await query.edit_message_reply_markup(reply_markup=kb)
@@ -1088,8 +1161,8 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             kb = make_markup(build_confirm_rows(
                 yes_cb=f"confirm:back:{pid_val}:{otn}:yes",
                 no_cb=f"confirm:back:{pid_val}:{otn}:no",
-                yes_label="✅ 确定离开",
-                no_label="↩️ 留在付款台",
+                yes_label=t("payment.confirm_leave", lang),
+                no_label=t("payment.stay_pay", lang),
             ))
             try:
                 await query.edit_message_reply_markup(reply_markup=kb)
@@ -1099,6 +1172,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
 
     async def cb_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        lang = _lang(update)
         try:
             await query.answer()
         except Exception:
@@ -1136,18 +1210,15 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 except Exception:
                     pass
                 # 3) 直接渲染首页（使用公共渲染函数）
-                await render_home(
-                    update.effective_chat.id,
-                    cur,
-                    START_CFG,
-                    _get_setting,
-                    _delete_last_and_send_photo,
-                    _delete_last_and_send_text,
-                )
+                await _render_home_for(update, lang)
             else:
                 # 用户选择“不取消”，仅恢复当前消息的付款键盘，避免界面消失
                 try:
-                    await query.edit_message_reply_markup(reply_markup=make_markup(rows_pay_console(otn)))
+                    await query.edit_message_reply_markup(reply_markup=make_markup(rows_pay_console(
+                        otn,
+                        recheck_label=t("payment.recheck_button", lang),
+                        cancel_label=t("payment.cancel_button", lang),
+                    )))
                 except Exception:
                     pass
             return
@@ -1167,13 +1238,18 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             else:
                 # 恢复原付款台键盘
                 try:
-                    await query.edit_message_reply_markup(reply_markup=make_markup(rows_pay_console(otn)))
+                    await query.edit_message_reply_markup(reply_markup=make_markup(rows_pay_console(
+                        otn,
+                        recheck_label=t("payment.recheck_button", lang),
+                        cancel_label=t("payment.cancel_button", lang),
+                    )))
                 except Exception:
                     pass
             return
 
     async def cb_recheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        lang = _lang(update)
         try:
             await query.answer()
         except Exception:
@@ -1184,7 +1260,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         # 限流：同一订单10秒内最多一次
         ts = _recheck_cooldown.get(out_trade_no, 0)
         if now - ts < 10:
-            await send_ephemeral(application.bot, update.effective_user.id, "⏳ 操作过于频繁，请稍后再试…")
+            await send_ephemeral(application.bot, update.effective_user.id, t("payment.recheck_too_fast", lang))
             return
         _recheck_cooldown[out_trade_no] = now
 
@@ -1193,7 +1269,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             (out_trade_no,)
         ).fetchone()
         if not row:
-            await send_ephemeral(application.bot, update.effective_user.id, "未找到该订单，请返回重试。")
+            await send_ephemeral(application.bot, update.effective_user.id, t("payment.order_not_found", lang))
             return
         oid, uid, pid, status, create_ts, payment_method, tier_id = row
         # 仅允许下单用户查询
@@ -1312,21 +1388,20 @@ WHERE p.id=?
                 try:
                     await _delete_last_and_send_text(
                         uid,
-                        "⏱️ 订单已超时并取消，请返回重新下单。",
-                        reply_markup=make_markup([row_back("show:list")]),
+                        t("payment.expired", lang),
+                        reply_markup=make_markup([_back("show:list", lang)]),
                     )
                 except Exception:
                     pass
                 return
-            await send_ephemeral(application.bot, uid, "尚未检测到支付成功，请完成支付后再点“🔄 我已支付，重新检查”。")
+            await send_ephemeral(application.bot, uid, t("payment.not_paid", lang))
             return
 
         # 其他状态
         def _status_zh(st: str) -> str:
-            """将订单状态英文映射为中文提示（使用全局常量）。"""
-            return STATUS_ZH.get(str(st).lower(), str(st))
+            return t(f"status.{str(st).lower()}", lang) if str(st).lower() in STATUS_ZH else str(st)
         try:
-            await _delete_last_and_send_text(uid, f"当前订单状态：{_status_zh(status)}")
+            await _delete_last_and_send_text(uid, t("payment.current_status", lang, status=_status_zh(status)))
         except Exception:
             pass
         return
@@ -1423,10 +1498,11 @@ WHERE p.id=?
                     pass
             
             name = None
+            user_lang = _user_lang(target_uid)
             try:
                 prow = cur.execute(
                     """
-SELECT p.name, t.name
+SELECT p.id, p.name, t.id, t.name
 FROM orders o
 LEFT JOIN products p ON p.id=o.product_id
 LEFT JOIN product_tiers t ON t.id=o.tier_id
@@ -1435,7 +1511,8 @@ WHERE o.id=?
                     (order_id,),
                 ).fetchone()
                 if prow:
-                    name = f"{prow[0]} - {prow[1]}" if prow[1] else prow[0]
+                    product_id, product_name, tier_id_val, tier_name = prow
+                    name = _localized_subject(str(product_id), str(tier_id_val) if tier_id_val else None, product_name, tier_name, user_lang)
             except Exception:
                 pass
             out_trade_no = None
@@ -1460,11 +1537,7 @@ WHERE o.id=?
                 pass
             try:
                 title = name or "群组"
-                user_msg = (
-                    f"🎉 已成功进群：{title}\n"
-                    f"🔒 一次性邀请链接将自动撤销\n"
-                    f"✅ 订单已完成 感谢支持！！！"
-                )
+                user_msg = t("delivery.group_success", user_lang, title=title)
                 await _delete_last_and_send_text(target_uid, user_msg)
             except Exception:
                 pass
@@ -1486,6 +1559,7 @@ WHERE o.id=?
     # 注册 handlers（用户端）
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("support", cmd_support))
+    application.add_handler(CallbackQueryHandler(cb_language, pattern=r"^lang:(zh|en)$"))
     application.add_handler(CallbackQueryHandler(cb_detail, pattern=r"^detail:"))
     application.add_handler(CallbackQueryHandler(cb_support, pattern=r"^support$"))
     application.add_handler(CallbackQueryHandler(cb_buy, pattern=r"^buy:"))

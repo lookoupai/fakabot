@@ -90,6 +90,47 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         except Exception:
             return str(value)
 
+    def _get_product_translation(pid: str, locale: str = "en"):
+        try:
+            return cur.execute(
+                "SELECT COALESCE(name,''), COALESCE(full_description,'') FROM product_translations WHERE product_id=? AND locale=?",
+                (pid, locale),
+            ).fetchone()
+        except Exception:
+            return None
+
+    def _set_product_translation(pid: str, field: str, value: str, locale: str = "en"):
+        current = _get_product_translation(pid, locale) or ("", "")
+        name, desc = current
+        if field == "name":
+            name = value
+        elif field == "desc":
+            desc = value
+        cur.execute(
+            "INSERT INTO product_translations(product_id, locale, name, full_description, updated_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(product_id, locale) DO UPDATE SET name=excluded.name, full_description=excluded.full_description, updated_at=excluded.updated_at",
+            (pid, locale, name, desc, int(time.time())),
+        )
+        conn.commit()
+
+    def _get_tier_translation(tid: str, locale: str = "en") -> str:
+        try:
+            row = cur.execute(
+                "SELECT COALESCE(name,'') FROM product_tier_translations WHERE tier_id=? AND locale=?",
+                (tid, locale),
+            ).fetchone()
+            return row[0] if row else ""
+        except Exception:
+            return ""
+
+    def _set_tier_translation(tid: str, value: str, locale: str = "en"):
+        cur.execute(
+            "INSERT INTO product_tier_translations(tier_id, locale, name, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(tier_id, locale) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at",
+            (tid, locale, value, int(time.time())),
+        )
+        conn.commit()
+
     def _deliver_label(value: str) -> str:
         return {"join_group": "自动拉群", "card_fixed": "通用卡密/文本", "card_pool": "卡池"}.get(str(value or ""), str(value or "-"))
 
@@ -159,10 +200,12 @@ WHERE t.product_id=? AND t.id=?
             await _send_text(chat_id, "⚠️ 未找到该档位", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
             return
         _tid, name, price, deliver_type, group_id, card_fixed_val, status, stock_cnt, product_name = row
+        name_en = _get_tier_translation(str(_tid))
         text = (
             f"商品：{product_name}\n"
             f"档位 #{_tid}\n"
             f"名称：{name}\n"
+            f"英文名称：{name_en or '-'}\n"
             f"价格：¥{_fmt_price(price)}\n"
             f"状态：{'上架' if status=='on' else '下架'}\n"
             f"发货方式：{_deliver_label(deliver_type)}\n"
@@ -172,6 +215,7 @@ WHERE t.product_id=? AND t.id=?
         )
         kb = make_markup([
             [InlineKeyboardButton("✏️ 改名称", callback_data=f"adm:tier_edit_name:{pid}:{_tid}"), InlineKeyboardButton("💰 改价格", callback_data=f"adm:tier_edit_price:{pid}:{_tid}")],
+            [InlineKeyboardButton("🌐 英文名称", callback_data=f"adm:tier_edit_i18n_name:{pid}:{_tid}")],
             [InlineKeyboardButton("🚚 发货方式", callback_data=f"adm:tier_edit_deliver:{pid}:{_tid}"), InlineKeyboardButton("🧷 通用卡密/文本", callback_data=f"adm:tier_edit_card_fixed:{pid}:{_tid}")],
             [InlineKeyboardButton("👥 改群ID", callback_data=f"adm:tier_edit_group:{pid}:{_tid}"), InlineKeyboardButton("🔑 档位卡池", callback_data=f"adm:tcard_pool:{pid}:{_tid}:1")],
             [InlineKeyboardButton("⏯ 上/下架", callback_data=f"adm:tier_toggle:{pid}:{_tid}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"adm:tier_del:{pid}:{_tid}")],
@@ -253,6 +297,8 @@ WHERE t.product_id=? AND t.id=?
             await _send_text(chat_id, "⚠️ 未找到该商品", reply_markup=kb)
             return
         _pid, name, price, desc, cover, status, deliver_type, card_fixed_val = row
+        tr = _get_product_translation(str(_pid)) or ("", "")
+        name_en, desc_en = tr
         # 统计卡池余量
         try:
             stock_row = cur.execute("SELECT COUNT(*) FROM card_keys WHERE product_id=? AND used_by_order_id IS NULL", (_pid,)).fetchone()
@@ -270,6 +316,7 @@ WHERE t.product_id=? AND t.id=?
         kb = make_markup([
             [InlineKeyboardButton("✏️ 改名称", callback_data=f"adm:edit_name:{_pid}"), InlineKeyboardButton("💰 价格档位", callback_data=f"adm:tiers:{_pid}")],
             [InlineKeyboardButton("📝 改详情", callback_data=f"adm:edit_desc:{_pid}"), InlineKeyboardButton("🖼️ 改封面", callback_data=f"adm:edit_cover:{_pid}")],
+            [InlineKeyboardButton("🌐 英文名称", callback_data=f"adm:edit_i18n_name:{_pid}"), InlineKeyboardButton("🌐 英文详情", callback_data=f"adm:edit_i18n_desc:{_pid}")],
             [InlineKeyboardButton("🚚 发货方式", callback_data=f"adm:edit_deliver:{_pid}"), InlineKeyboardButton("🧷 通用卡密", callback_data=f"adm:edit_card_fixed:{_pid}")],
             [InlineKeyboardButton("🔑 卡密库存", callback_data=f"adm:card_pool:{_pid}:1"), InlineKeyboardButton("👥 改群ID", callback_data=f"adm:edit_group:{_pid}")],
             [InlineKeyboardButton("⏯ 上/下架", callback_data=f"adm:toggle:{_pid}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"adm:del:{_pid}")],
@@ -285,6 +332,8 @@ WHERE t.product_id=? AND t.id=?
             f"封面：{cover or '-'}\n"
             f"发货方式：{_deliver_label}\n"
             f"卡池余量：{stock_cnt}\n"
+            f"英文名称：{name_en or '-'}\n"
+            f"英文详情：{(desc_en or '-')[:200]}\n"
             f"详情：{(desc or '-')[:300]}"
         )
         if cover:
@@ -972,12 +1021,25 @@ WHERE t.product_id=? AND t.id=?
             await _send_tiers_page(update.effective_chat.id, pid)
             return
 
+        if action == "tier_edit_i18n_name":
+            if len(parts) < 4:
+                await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
+                return
+            pid, tid = parts[2], parts[3]
+            ctx.user_data["adm_wait"] = {"type": "tier_i18n_name", "data": {"pid": pid, "tid": tid}}
+            await _send_text(update.effective_chat.id, "请输入该档位的【英文名称】：", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+            return
+
         if action.startswith("tier_edit_"):
             if len(parts) < 4:
                 await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
                 return
             field = action.replace("tier_edit_", "", 1)
             pid, tid = parts[2], parts[3]
+            if field == "i18n_name":
+                ctx.user_data["adm_wait"] = {"type": "tier_edit_i18n_name", "data": {"pid": pid, "tid": tid}}
+                await _send_text(update.effective_chat.id, "请输入该档位的【英文名称】：", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+                return
             if field == "deliver":
                 kb = make_markup([
                     [
@@ -1670,7 +1732,36 @@ WHERE t.product_id=? AND t.id=?
             await _send_product_page(update.effective_chat.id, str(pid))
             return
 
+        # 编辑商品英文翻译 - 启动等待态
+        if action.startswith("edit_i18n_"):
+            field = action.replace("edit_i18n_", "", 1)
+            pid = parts[2]
+            prompts = {
+                "name": "请输入该商品的【英文名称】：",
+                "desc": "请输入该商品的【英文详情】：",
+            }
+            if field not in prompts:
+                await _send_text(update.effective_chat.id, "不支持的字段", reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
+                return
+            ctx.user_data["adm_wait"] = {"type": f"product_i18n_{field}", "data": {"pid": pid}}
+            await _send_text(update.effective_chat.id, prompts[field], reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
+            return
+
         # 编辑商品字段 - 启动等待态
+        if action.startswith("edit_i18n_"):
+            field = action.replace("edit_i18n_", "", 1)
+            pid = parts[2]
+            prompts = {
+                "name": "请输入该商品的【英文名称】：",
+                "desc": "请输入该商品的【英文详情】：",
+            }
+            if field not in prompts:
+                await _send_text(update.effective_chat.id, "不支持的英文翻译字段", reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
+                return
+            ctx.user_data["adm_wait"] = {"type": f"edit_i18n_{field}", "data": {"pid": pid}}
+            await _send_text(update.effective_chat.id, prompts[field], reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
+            return
+
         if action.startswith("edit_"):
             field = action.split(":")[0][5:]  # name/price/desc/cover/group/deliver/card_fixed
             pid = parts[2]
@@ -2214,6 +2305,12 @@ WHERE t.product_id=? AND t.id=?
             pid = state["data"].get("pid")
             tid = state["data"].get("tid")
             field = kind.replace("tier_edit_", "", 1)
+            if field == "i18n_name":
+                _set_tier_translation(tid, text)
+                ctx.user_data.pop("adm_wait", None)
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存档位英文名称", ttl=2)
+                await _send_tier_page(update.effective_chat.id, pid, tid)
+                return
             if field == "price":
                 try:
                     val = float(text)
@@ -2391,6 +2488,16 @@ WHERE t.product_id=? AND t.id=?
         if kind and kind.startswith("edit_"):
             pid = state["data"].get("pid")
             field = kind.split("_", 1)[1]
+            if field.startswith("i18n_"):
+                i18n_field = field.replace("i18n_", "", 1)
+                if i18n_field not in {"name", "desc"}:
+                    await update.message.reply_text("不支持的英文翻译字段。", reply_markup=make_markup([row_back(f"adm:p:{pid}")]))
+                    return
+                _set_product_translation(pid, i18n_field, text)
+                ctx.user_data.pop("adm_wait", None)
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存商品英文信息", ttl=2)
+                await _send_product_page(update.effective_chat.id, pid)
+                return
             if field == "price":
                 try:
                     val = float(text)

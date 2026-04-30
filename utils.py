@@ -18,6 +18,8 @@ import time
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from i18n import language_button_label, normalize_language, t
+
 try:
     from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 except Exception:  # 测试环境兜底桩：不影响真实运行
@@ -88,6 +90,7 @@ MSG: Dict[str, str] = {
 # ---------------- home.py ----------------
 # 类型注释仅作参考，不强制
 _GetSetting = Callable[[str, Optional[str]], Optional[str]]
+_GetProductText = Callable[[int, str, str, str], str]
 
 async def render_home(
     chat_id: int,
@@ -98,18 +101,30 @@ async def render_home(
     _delete_last_and_send_text: Callable[..., Any],
     *,
     extra_rows: Optional[list[list[InlineKeyboardButton]]] = None,
+    language: str = "zh",
+    get_product_text: Optional[_GetProductText] = None,
+    show_language_switch: bool = False,
 ):
     """渲染首页（封面 + 标题/简介 + 商品按钮）。
     所有依赖通过参数传入，方便在不同模块中复用。
     """
+    lang = normalize_language(language)
     try:
-        title = (_get_setting("home.title", (START_CFG.get("title") or "欢迎选购")) or "欢迎选购").strip()
+        default_title = START_CFG.get("title_en") if lang == "en" else START_CFG.get("title")
+        if not default_title:
+            default_title = t("home.default_title", lang)
+        title_key = "home.title_en" if lang == "en" else "home.title"
+        title = (_get_setting(title_key, default_title) or default_title).strip()
     except Exception:
-        title = "欢迎选购"
+        title = t("home.default_title", lang)
     try:
-        intro = (_get_setting("home.intro", (START_CFG.get("intro") or "请选择下方商品进行购买")) or "请选择下方商品进行购买").strip()
+        default_intro = START_CFG.get("intro_en") if lang == "en" else START_CFG.get("intro")
+        if not default_intro:
+            default_intro = t("home.default_intro", lang)
+        intro_key = "home.intro_en" if lang == "en" else "home.intro"
+        intro = (_get_setting(intro_key, default_intro) or default_intro).strip()
     except Exception:
-        intro = "请选择下方商品进行购买"
+        intro = t("home.default_intro", lang)
     try:
         cover = _get_setting("home.cover_url", START_CFG.get("cover_url") or None)
     except Exception:
@@ -148,27 +163,41 @@ ORDER BY COALESCE(p.sort, p.id) DESC, p.id DESC
 
     # 读取按钮文案模板。支持占位符：{name}、{price}
     try:
-        btn_tpl = _get_setting("home.button_template", (START_CFG.get("button_template") or " {name} | ¥{price}")) or " {name} | ¥{price}"
+        btn_tpl_key = "home.button_template_en" if lang == "en" else "home.button_template"
+        btn_tpl_default = START_CFG.get("button_template_en") if lang == "en" else START_CFG.get("button_template")
+        btn_tpl = _get_setting(btn_tpl_key, (btn_tpl_default or " {name} | ¥{price}")) or " {name} | ¥{price}"
     except Exception:
         btn_tpl = " {name} | ¥{price}"
 
     buttons: List[List[InlineKeyboardButton]] = []
     row_btn: List[InlineKeyboardButton] = []
     for pid, name, min_price, max_price, tier_count in rows:
+        label_name = str(name)
+        if get_product_text:
+            try:
+                label_name = get_product_text(int(pid), lang, "name", label_name)
+            except Exception:
+                label_name = str(name)
         if int(tier_count or 0) > 1 and float(min_price or 0) != float(max_price or 0):
             price = f"{min_price}-{max_price}"
         else:
             price = min_price
         try:
-            label = str(btn_tpl).replace("{name}", str(name)).replace("{price}", str(price))
+            label = str(btn_tpl).replace("{name}", str(label_name)).replace("{price}", str(price))
         except Exception:
-            label = f" {name} | ¥{price}"
+            label = f" {label_name} | ¥{price}"
         row_btn.append(InlineKeyboardButton(label, callback_data=f"detail:{pid}"))
         if len(row_btn) >= cols:
             buttons.append(row_btn)
             row_btn = []
     if row_btn:
         buttons.append(row_btn)
+
+    if show_language_switch:
+        buttons.append([
+            InlineKeyboardButton(language_button_label("zh", lang), callback_data="lang:zh"),
+            InlineKeyboardButton(language_button_label("en", lang), callback_data="lang:en"),
+        ])
 
     # 追加额外按钮行（例如：返回）
     if extra_rows:
@@ -178,7 +207,7 @@ ORDER BY COALESCE(p.sort, p.id) DESC, p.id DESC
 
     # 客服入口改为独立命令 /support，此处不再在首页展示按钮
 
-    caption = f"{title}\n\n{intro}\n\n请选择商品："
+    caption = f"{title}\n\n{intro}\n\n{t('home.choose_product', lang)}"
 
     if cover:
         try:
@@ -353,10 +382,15 @@ def make_markup(rows: Sequence[Sequence[InlineKeyboardButton]] | None) -> Option
     return InlineKeyboardMarkup(list(rows))
 
 # 统一的付款台控制行：用于“重新检查/取消付款”等
-def rows_pay_console(otn: str) -> List[List[InlineKeyboardButton]]:
+def rows_pay_console(
+    otn: str,
+    *,
+    recheck_label: str = "🔄 我已支付，重新检查",
+    cancel_label: str = "❌ 取消本次付款",
+) -> List[List[InlineKeyboardButton]]:
     return [[
-        InlineKeyboardButton("🔄 我已支付，重新检查", callback_data=f"recheck:{otn}"),
-        InlineKeyboardButton("❌ 取消本次付款", callback_data=f"ask:cancel:{otn}"),
+        InlineKeyboardButton(recheck_label, callback_data=f"recheck:{otn}"),
+        InlineKeyboardButton(cancel_label, callback_data=f"ask:cancel:{otn}"),
     ]]
 
 # 通用确认对话行：yes/no 两个按钮在同一行
