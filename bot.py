@@ -328,6 +328,103 @@ try:
 except Exception:
     pass
 
+# --- Migrations for product price tiers ---
+try:
+    cur.execute(
+        """
+CREATE TABLE IF NOT EXISTS product_tiers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price REAL NOT NULL,
+    deliver_type TEXT NOT NULL DEFAULT 'join_group',
+    tg_group_id TEXT,
+    card_fixed TEXT,
+    status TEXT NOT NULL DEFAULT 'on',
+    sort INTEGER,
+    create_time INTEGER NOT NULL
+)
+"""
+    )
+    conn.commit()
+except Exception:
+    pass
+try:
+    cur.execute("ALTER TABLE orders ADD COLUMN tier_id INTEGER")
+    conn.commit()
+except Exception:
+    pass
+try:
+    cur.execute("ALTER TABLE card_keys ADD COLUMN tier_id INTEGER")
+    conn.commit()
+except Exception:
+    pass
+try:
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_product_tiers_product_status ON product_tiers(product_id, status, sort)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_tier_id ON orders(tier_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_card_keys_tier_used ON card_keys(tier_id, used_by_order_id)")
+    conn.commit()
+except Exception:
+    pass
+try:
+    now_ts = int(time.time())
+    cur.execute(
+        """
+INSERT INTO product_tiers(product_id, name, price, deliver_type, tg_group_id, card_fixed, status, sort, create_time)
+SELECT p.id,
+       '默认档位',
+       p.price,
+       COALESCE(p.deliver_type, 'join_group'),
+       COALESCE(p.tg_group_id, ''),
+       COALESCE(p.card_fixed, ''),
+       COALESCE(p.status, 'on'),
+       COALESCE(p.sort, p.id),
+       ?
+FROM products p
+WHERE NOT EXISTS (
+    SELECT 1 FROM product_tiers t WHERE t.product_id = p.id
+)
+""",
+        (now_ts,),
+    )
+    conn.commit()
+except Exception:
+    pass
+try:
+    cur.execute(
+        """
+UPDATE orders
+SET tier_id = (
+    SELECT t.id
+    FROM product_tiers t
+    WHERE t.product_id = orders.product_id
+    ORDER BY COALESCE(t.sort, t.id) DESC, t.id DESC
+    LIMIT 1
+)
+WHERE tier_id IS NULL
+"""
+    )
+    conn.commit()
+except Exception:
+    pass
+try:
+    cur.execute(
+        """
+UPDATE card_keys
+SET tier_id = (
+    SELECT t.id
+    FROM product_tiers t
+    WHERE t.product_id = card_keys.product_id
+    ORDER BY COALESCE(t.sort, t.id) DESC, t.id DESC
+    LIMIT 1
+)
+WHERE tier_id IS NULL
+"""
+    )
+    conn.commit()
+except Exception:
+    pass
+
 # --- TOKEN188 USDT交易记录表 ---
 try:
     cur.execute(
@@ -356,12 +453,12 @@ def _mark_paid_and_deliver(out_trade_no: str, conn_override=None, cur_override=N
     _conn = conn_override or conn
     _cur = cur_override or cur
     row = _cur.execute(
-        "SELECT id, user_id, product_id, status FROM orders WHERE out_trade_no=?",
+        "SELECT id, user_id, product_id, status, tier_id FROM orders WHERE out_trade_no=?",
         (out_trade_no,),
     ).fetchone()
     if not row:
         return
-    oid, uid, pid, status = row
+    oid, uid, pid, status, tier_id = row
     reissue = False
     if status != "pending":
         if status == "paid":
@@ -383,7 +480,20 @@ def _mark_paid_and_deliver(out_trade_no: str, conn_override=None, cur_override=N
         _cur.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))
         _conn.commit()
 
-    prod_row = _cur.execute("SELECT tg_group_id, name, deliver_type, card_fixed FROM products WHERE id=?", (pid,)).fetchone()
+    prod_row = _cur.execute(
+        """
+SELECT
+    COALESCE(t.tg_group_id, p.tg_group_id, ''),
+    p.name,
+    COALESCE(t.deliver_type, p.deliver_type, 'join_group'),
+    COALESCE(t.card_fixed, p.card_fixed, ''),
+    COALESCE(t.name, '')
+FROM products p
+LEFT JOIN product_tiers t ON t.id = ?
+WHERE p.id=?
+""",
+        (tier_id, pid),
+    ).fetchone()
     if not prod_row:
         # 通常是商品被删除或尚未创建，避免静默失败：通知管理员并提醒用户
         async def _notify_missing():
@@ -412,7 +522,8 @@ def _mark_paid_and_deliver(out_trade_no: str, conn_override=None, cur_override=N
         except Exception:
             pass
         return
-    group_id, name, deliver_type, card_fixed = prod_row
+    group_id, product_name, deliver_type, card_fixed, tier_name = prod_row
+    name = f"{product_name} - {tier_name}" if tier_name else product_name
 
     # Branch by deliver_type
     dt = (deliver_type or 'join_group').strip().lower()
@@ -449,8 +560,8 @@ def _mark_paid_and_deliver(out_trade_no: str, conn_override=None, cur_override=N
                     card_text = None
                     for _ in range(max_try):
                         row_key = _cur.execute(
-                            "SELECT id, key_text FROM card_keys WHERE product_id=? AND used_by_order_id IS NULL ORDER BY id ASC LIMIT 1",
-                            (pid,)
+                            "SELECT id, key_text FROM card_keys WHERE product_id=? AND tier_id=? AND used_by_order_id IS NULL ORDER BY id ASC LIMIT 1",
+                            (pid, tier_id)
                         ).fetchone()
                         if not row_key:
                             break

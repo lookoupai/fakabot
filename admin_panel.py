@@ -81,6 +81,105 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         except Exception:
             pass
 
+    def _fmt_price(value) -> str:
+        try:
+            num = float(value)
+            if num.is_integer():
+                return str(int(num))
+            return f"{num:.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(value)
+
+    def _deliver_label(value: str) -> str:
+        return {"join_group": "自动拉群", "card_fixed": "通用卡密/文本", "card_pool": "卡池"}.get(str(value or ""), str(value or "-"))
+
+    def _ensure_default_tier(pid: str):
+        try:
+            exist = cur.execute("SELECT 1 FROM product_tiers WHERE product_id=? LIMIT 1", (pid,)).fetchone()
+            if exist:
+                return
+            row = cur.execute(
+                "SELECT price, COALESCE(deliver_type,'join_group'), COALESCE(tg_group_id,''), COALESCE(card_fixed,''), COALESCE(status,'on'), COALESCE(sort,id) FROM products WHERE id=?",
+                (pid,),
+            ).fetchone()
+            if not row:
+                return
+            price, deliver_type, group_id, card_fixed_val, status, sort_val = row
+            cur.execute(
+                "INSERT INTO product_tiers(product_id, name, price, deliver_type, tg_group_id, card_fixed, status, sort, create_time) VALUES (?,?,?,?,?,?,?,?,?)",
+                (pid, "默认档位", price, deliver_type, group_id, card_fixed_val, status, sort_val, int(time.time())),
+            )
+            tid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
+            cur.execute("UPDATE card_keys SET tier_id=? WHERE product_id=? AND tier_id IS NULL", (tid, pid))
+            conn.commit()
+        except Exception:
+            pass
+
+    async def _send_tiers_page(chat_id: int, pid: str):
+        _ensure_default_tier(pid)
+        product = cur.execute("SELECT name FROM products WHERE id=?", (pid,)).fetchone()
+        if not product:
+            await _send_text(chat_id, "⚠️ 未找到该商品", reply_markup=make_markup([row_back("adm:plist:1")]))
+            return
+        rows = cur.execute(
+            """
+SELECT t.id, t.name, t.price, COALESCE(t.deliver_type,'join_group'), COALESCE(t.status,'on'),
+       (SELECT COUNT(*) FROM card_keys ck WHERE ck.tier_id=t.id AND ck.used_by_order_id IS NULL)
+FROM product_tiers t
+WHERE t.product_id=?
+ORDER BY COALESCE(t.sort,t.id) DESC, t.id DESC
+""",
+            (pid,),
+        ).fetchall()
+        lines = [f"商品：{product[0]}", "", "价格档位："]
+        buttons = []
+        for tid, name, price, deliver_type, status, stock_cnt in rows:
+            lines.append(f"#{tid} {name} ¥{_fmt_price(price)} [{_deliver_label(deliver_type)}] {'上架' if status=='on' else '下架'} 库存:{stock_cnt or 0}")
+            buttons.append([InlineKeyboardButton(f"#{tid} {name}", callback_data=f"adm:tier:{pid}:{tid}")])
+        if not rows:
+            lines.append("(暂无档位)")
+        buttons.append([InlineKeyboardButton("➕ 新增档位", callback_data=f"adm:tier_new:{pid}")])
+        buttons.append(row_back(f"adm:p:{pid}"))
+        buttons.append(row_home_admin())
+        await _send_text(chat_id, "\n".join(lines), reply_markup=make_markup(buttons))
+
+    async def _send_tier_page(chat_id: int, pid: str, tid: str):
+        row = cur.execute(
+            """
+SELECT t.id, t.name, t.price, COALESCE(t.deliver_type,'join_group'), COALESCE(t.tg_group_id,''), COALESCE(t.card_fixed,''), COALESCE(t.status,'on'),
+       (SELECT COUNT(*) FROM card_keys ck WHERE ck.tier_id=t.id AND ck.used_by_order_id IS NULL),
+       p.name
+FROM product_tiers t
+JOIN products p ON p.id=t.product_id
+WHERE t.product_id=? AND t.id=?
+""",
+            (pid, tid),
+        ).fetchone()
+        if not row:
+            await _send_text(chat_id, "⚠️ 未找到该档位", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+            return
+        _tid, name, price, deliver_type, group_id, card_fixed_val, status, stock_cnt, product_name = row
+        text = (
+            f"商品：{product_name}\n"
+            f"档位 #{_tid}\n"
+            f"名称：{name}\n"
+            f"价格：¥{_fmt_price(price)}\n"
+            f"状态：{'上架' if status=='on' else '下架'}\n"
+            f"发货方式：{_deliver_label(deliver_type)}\n"
+            f"群ID：{group_id or '-'}\n"
+            f"通用卡密/文本：{(card_fixed_val or '-')[:120]}\n"
+            f"卡池余量：{stock_cnt or 0}"
+        )
+        kb = make_markup([
+            [InlineKeyboardButton("✏️ 改名称", callback_data=f"adm:tier_edit_name:{pid}:{_tid}"), InlineKeyboardButton("💰 改价格", callback_data=f"adm:tier_edit_price:{pid}:{_tid}")],
+            [InlineKeyboardButton("🚚 发货方式", callback_data=f"adm:tier_edit_deliver:{pid}:{_tid}"), InlineKeyboardButton("🧷 通用卡密/文本", callback_data=f"adm:tier_edit_card_fixed:{pid}:{_tid}")],
+            [InlineKeyboardButton("👥 改群ID", callback_data=f"adm:tier_edit_group:{pid}:{_tid}"), InlineKeyboardButton("🔑 档位卡池", callback_data=f"adm:tcard_pool:{pid}:{_tid}:1")],
+            [InlineKeyboardButton("⏯ 上/下架", callback_data=f"adm:tier_toggle:{pid}:{_tid}"), InlineKeyboardButton("🗑️ 删除", callback_data=f"adm:tier_del:{pid}:{_tid}")],
+            row_back(f"adm:tiers:{pid}"),
+            row_home_admin(),
+        ])
+        await _send_text(chat_id, text, reply_markup=kb)
+
     async def _admin_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not await _guard_admin(update):
             return
@@ -144,6 +243,7 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         )
 
     async def _send_product_page(chat_id: int, pid: str):
+        _ensure_default_tier(pid)
         row = cur.execute("SELECT id, name, price, full_description, cover_url, COALESCE(status,'on'), COALESCE(deliver_type,'join_group'), COALESCE(card_fixed,'') FROM products WHERE id=?", (pid,)).fetchone()
         if not row:
             kb = make_markup([
@@ -159,8 +259,16 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
             stock_cnt = int(stock_row[0] or 0)
         except Exception:
             stock_cnt = 0
+        try:
+            tier_rows = cur.execute(
+                "SELECT name, price, COALESCE(status,'on') FROM product_tiers WHERE product_id=? ORDER BY COALESCE(sort,id) DESC, id DESC",
+                (_pid,),
+            ).fetchall()
+        except Exception:
+            tier_rows = []
+        tier_text = "\n".join([f"- {r[0]}：¥{_fmt_price(r[1])} ({'上架' if r[2]=='on' else '下架'})" for r in tier_rows]) or "- 暂无档位"
         kb = make_markup([
-            [InlineKeyboardButton("✏️ 改名称", callback_data=f"adm:edit_name:{_pid}"), InlineKeyboardButton("💰 改价格", callback_data=f"adm:edit_price:{_pid}")],
+            [InlineKeyboardButton("✏️ 改名称", callback_data=f"adm:edit_name:{_pid}"), InlineKeyboardButton("💰 价格档位", callback_data=f"adm:tiers:{_pid}")],
             [InlineKeyboardButton("📝 改详情", callback_data=f"adm:edit_desc:{_pid}"), InlineKeyboardButton("🖼️ 改封面", callback_data=f"adm:edit_cover:{_pid}")],
             [InlineKeyboardButton("🚚 发货方式", callback_data=f"adm:edit_deliver:{_pid}"), InlineKeyboardButton("🧷 通用卡密", callback_data=f"adm:edit_card_fixed:{_pid}")],
             [InlineKeyboardButton("🔑 卡密库存", callback_data=f"adm:card_pool:{_pid}:1"), InlineKeyboardButton("👥 改群ID", callback_data=f"adm:edit_group:{_pid}")],
@@ -172,7 +280,7 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         text = (
             f"商品 #{_pid}\n"
             f"名称：{name}\n"
-            f"价格：¥{price}\n"
+            f"价格档位：\n{tier_text}\n"
             f"状态：{'上架' if (status or 'on')=='on' else '下架'}\n"
             f"封面：{cover or '-'}\n"
             f"发货方式：{_deliver_label}\n"
@@ -345,10 +453,10 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         TOPN = 5
         base_where = ("WHERE " + " AND ".join(where) + (" AND " if where else "") + "o.status IN ('paid','completed')") if where else "WHERE o.status IN ('paid','completed')"
         prod_rows = cur.execute(
-            "SELECT COALESCE(p.name,'商品') AS name, COUNT(o.id) AS cnt, COALESCE(SUM(o.amount),0) AS amt "
-            "FROM orders o LEFT JOIN products p ON p.id=o.product_id "
+            "SELECT COALESCE(p.name,'商品') || CASE WHEN t.name IS NOT NULL THEN ' - ' || t.name ELSE '' END AS name, COUNT(o.id) AS cnt, COALESCE(SUM(o.amount),0) AS amt "
+            "FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN product_tiers t ON t.id=o.tier_id "
             + base_where +
-            " GROUP BY o.product_id ORDER BY amt DESC LIMIT ?",
+            " GROUP BY o.product_id, o.tier_id ORDER BY amt DESC LIMIT ?",
             (*params, TOPN)
         ).fetchall()
         max_amt = max([float(r[2] or 0) for r in prod_rows] + [0])
@@ -393,7 +501,7 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
 
         # 清理等待态，避免串台（除编辑步骤继续输入场景外）
         # 仅在进入新页面时清理
-        if action in {"plist", "p", "home", "pnew", "menu", "olist", "o", "ostat", "of_setrange", "of_search", "sf_today", "sf_month", "sf_year"}:
+        if action in {"plist", "p", "tiers", "tier", "home", "pnew", "menu", "olist", "o", "ostat", "of_setrange", "of_search", "sf_today", "sf_month", "sf_year"}:
             ctx.user_data.pop("adm_wait", None)
 
         # 商品列表（分页 + 行内排序 上/下）
@@ -802,6 +910,162 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
             await _send_product_page(update.effective_chat.id, pid)
             return
 
+        if action == "tiers":
+            pid = parts[2]
+            await _send_tiers_page(update.effective_chat.id, pid)
+            return
+
+        if action == "tier":
+            if len(parts) < 4:
+                await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
+                return
+            pid, tid = parts[2], parts[3]
+            await _send_tier_page(update.effective_chat.id, pid, tid)
+            return
+
+        if action == "tier_new":
+            pid = parts[2]
+            ctx.user_data["adm_wait"] = {"type": "tier_new_name", "data": {"pid": pid}}
+            await _send_text(update.effective_chat.id, "请输入新档位【名称】：", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+            return
+
+        if action == "tier_new_deliver":
+            if len(parts) < 4:
+                await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
+                return
+            pid, method = parts[2], parts[3]
+            state = ctx.user_data.get("adm_wait") or {}
+            if state.get("type") != "tier_new_deliver" or str(state.get("data", {}).get("pid")) != str(pid):
+                await _send_text(update.effective_chat.id, "新增档位状态已失效，请重新开始。", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+                return
+            data = state.get("data") or {}
+            name = data.get("name")
+            price = data.get("price")
+            sort_val = int(time.time())
+            if method == "join_group":
+                ctx.user_data["adm_wait"] = {"type": "tier_new_group", "data": {"pid": pid, "name": name, "price": price, "deliver_type": method, "sort": sort_val}}
+                await _send_text(update.effective_chat.id, "请输入该档位的目标群组ID：", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+                return
+            if method not in {"card_fixed", "card_pool"}:
+                await _send_text(update.effective_chat.id, "不支持的发货方式", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+                return
+            cur.execute(
+                "INSERT INTO product_tiers(product_id, name, price, deliver_type, tg_group_id, card_fixed, status, sort, create_time) VALUES (?,?,?,?,?,?,?,?,?)",
+                (pid, name, price, method, "", "", "on", sort_val, int(time.time())),
+            )
+            conn.commit()
+            ctx.user_data.pop("adm_wait", None)
+            await _send_tiers_page(update.effective_chat.id, pid)
+            return
+
+        if action.startswith("tier_edit_"):
+            if len(parts) < 4:
+                await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
+                return
+            field = action.replace("tier_edit_", "", 1)
+            pid, tid = parts[2], parts[3]
+            if field == "deliver":
+                kb = make_markup([
+                    [
+                        InlineKeyboardButton("👥 自动拉群", callback_data=f"adm:tier_set_deliver:{pid}:{tid}:join_group"),
+                        InlineKeyboardButton("🧷 通用卡密/文本", callback_data=f"adm:tier_set_deliver:{pid}:{tid}:card_fixed"),
+                    ],
+                    [InlineKeyboardButton("🔑 卡池", callback_data=f"adm:tier_set_deliver:{pid}:{tid}:card_pool")],
+                    row_back(f"adm:tier:{pid}:{tid}"),
+                ])
+                await _send_text(update.effective_chat.id, "请选择该档位的【发货方式】：", reply_markup=kb)
+                return
+            asks = {
+                "name": "请输入新的【档位名称】：",
+                "price": "请输入新的【档位价格】（数字）：",
+                "group": "请输入新的【群组ID】：例如 -1001234567890",
+                "card_fixed": "请输入新的【通用卡密/文本】：",
+            }
+            if field not in asks:
+                await _send_text(update.effective_chat.id, "不支持的字段", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+                return
+            ctx.user_data["adm_wait"] = {"type": f"tier_edit_{field}", "data": {"pid": pid, "tid": tid}}
+            await _send_text(update.effective_chat.id, asks[field], reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+            return
+
+        if action == "tier_set_deliver":
+            if len(parts) < 5:
+                await _send_text(update.effective_chat.id, "参数错误", reply_markup=make_markup([row_back("adm:plist:1")]))
+                return
+            pid, tid, method = parts[2], parts[3], parts[4]
+            if method not in {"join_group", "card_fixed", "card_pool"}:
+                await _send_text(update.effective_chat.id, "不支持的发货方式", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+                return
+            cur.execute("UPDATE product_tiers SET deliver_type=? WHERE id=? AND product_id=?", (method, tid, pid))
+            conn.commit()
+            await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存档位发货方式", ttl=2)
+            await _send_tier_page(update.effective_chat.id, pid, tid)
+            return
+
+        if action == "tier_toggle":
+            pid, tid = parts[2], parts[3]
+            row = cur.execute("SELECT COALESCE(status,'on') FROM product_tiers WHERE id=? AND product_id=?", (tid, pid)).fetchone()
+            if row:
+                new_status = "off" if row[0] == "on" else "on"
+                cur.execute("UPDATE product_tiers SET status=? WHERE id=? AND product_id=?", (new_status, tid, pid))
+                conn.commit()
+            await _send_tier_page(update.effective_chat.id, pid, tid)
+            return
+
+        if action == "tier_del":
+            pid, tid = parts[2], parts[3]
+            cnt = cur.execute("SELECT COUNT(*) FROM product_tiers WHERE product_id=?", (pid,)).fetchone()[0]
+            used = cur.execute("SELECT 1 FROM orders WHERE tier_id=? LIMIT 1", (tid,)).fetchone()
+            if int(cnt or 0) <= 1 or used:
+                await _send_text(update.effective_chat.id, "最后一个档位或已有订单引用的档位不能删除，可改为下架。", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+                return
+            cur.execute("DELETE FROM product_tiers WHERE id=? AND product_id=?", (tid, pid))
+            cur.execute("DELETE FROM card_keys WHERE tier_id=? AND used_by_order_id IS NULL", (tid,))
+            conn.commit()
+            await _send_tiers_page(update.effective_chat.id, pid)
+            return
+
+        if action == "tcard_pool":
+            if len(parts) < 4:
+                return
+            pid, tid = parts[2], parts[3]
+            page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 1
+            page = max(1, page)
+            page_size = 10
+            stock_cnt = int((cur.execute("SELECT COUNT(*) FROM card_keys WHERE tier_id=? AND used_by_order_id IS NULL", (tid,)).fetchone() or [0])[0] or 0)
+            used_cnt = int((cur.execute("SELECT COUNT(*) FROM card_keys WHERE tier_id=? AND used_by_order_id IS NOT NULL", (tid,)).fetchone() or [0])[0] or 0)
+            total_pages = max(1, (stock_cnt + page_size - 1) // page_size)
+            page = min(page, total_pages)
+            offset = (page - 1) * page_size
+            rows = cur.execute("SELECT id, key_text FROM card_keys WHERE tier_id=? AND used_by_order_id IS NULL ORDER BY id ASC LIMIT ? OFFSET ?", (tid, page_size, offset)).fetchall()
+            preview = "\n".join([f"#{r[0]} {str(r[1])[:60]}" for r in rows]) if rows else "(本页暂无未使用卡密)"
+            text = f"🔑 档位 #{tid} 卡密库存\n未使用：{stock_cnt} | 已使用：{used_cnt}\n页码：{page}/{total_pages}\n\n{preview}"
+            btns = [[InlineKeyboardButton("📥 导入卡密", callback_data=f"adm:tcp_import:{pid}:{tid}"), InlineKeyboardButton("🧹 清空未用", callback_data=f"adm:tcp_clear:{pid}:{tid}")]]
+            nav = []
+            if page > 1:
+                nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"adm:tcard_pool:{pid}:{tid}:{page-1}"))
+            if page < total_pages:
+                nav.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"adm:tcard_pool:{pid}:{tid}:{page+1}"))
+            if nav:
+                btns.append(nav)
+            btns.append(row_back(f"adm:tier:{pid}:{tid}"))
+            await _send_text(update.effective_chat.id, text, reply_markup=make_markup(btns))
+            return
+
+        if action == "tcp_import":
+            pid, tid = parts[2], parts[3]
+            ctx.user_data["adm_wait"] = {"type": "tcp_import", "data": {"pid": pid, "tid": tid}}
+            await _send_text(update.effective_chat.id, "请粘贴该档位要导入的卡密文本：\n- 每行一条\n- 自动忽略空行和重复内容", reply_markup=make_markup([row_back(f"adm:tcard_pool:{pid}:{tid}:1")]))
+            return
+
+        if action == "tcp_clear":
+            pid, tid = parts[2], parts[3]
+            cur.execute("DELETE FROM card_keys WHERE tier_id=? AND used_by_order_id IS NULL", (tid,))
+            conn.commit()
+            await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已清空该档位未使用卡密", ttl=2)
+            await _send_tier_page(update.effective_chat.id, pid, tid)
+            return
+
         # 单个订单详情
         if action == "o":
             if len(parts) < 3:
@@ -811,18 +1075,19 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
             status_key = parts[3] if len(parts) > 3 else "all"
             back_page = parts[4] if len(parts) > 4 else "1"
             row = cur.execute(
-                "SELECT o.id, o.user_id, o.product_id, o.amount, o.payment_method, COALESCE(o.status,'pending'), o.create_time, o.out_trade_no, p.name "
-                "FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=?",
+                "SELECT o.id, o.user_id, o.product_id, o.amount, o.payment_method, COALESCE(o.status,'pending'), o.create_time, o.out_trade_no, p.name, t.name "
+                "FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN product_tiers t ON t.id=o.tier_id WHERE o.id=?",
                 (oid,)
             ).fetchone()
             if not row:
                 await _send_text(update.effective_chat.id, "未找到该订单", reply_markup=make_markup([row_back(f"adm:olist:{back_page}:{status_key}")]))
                 return
-            _oid, uid, pid, amount, pm, st, cts, out_trade_no, pname = row
+            _oid, uid, pid, amount, pm, st, cts, out_trade_no, pname, tier_name = row
+            order_title = f"{pname} - {tier_name}" if tier_name else (pname or pid)
             txt = (
                 f"订单 #{_oid}\n"
                 f"用户ID：{uid}\n"
-                f"商品：{pname or pid}\n"
+                f"商品：{order_title}\n"
                 f"金额：¥{amount}\n"
                 f"支付方式：{pm}\n"
                 f"状态：{STATUS_ZH.get((st or '').lower(), st)}\n"
@@ -1242,6 +1507,7 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         if action == "del":
             pid = parts[2]
             cur.execute("DELETE FROM products WHERE id=?", (pid,))
+            cur.execute("DELETE FROM product_tiers WHERE product_id=?", (pid,))
             conn.commit()
             await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已删除，返回列表…", ttl=2)
             # 返回列表
@@ -1381,6 +1647,7 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
                 )
                 conn.commit()
                 pid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _ensure_default_tier(str(pid))
             except Exception:
                 await _send_text(update.effective_chat.id, "保存失败，请稍后重试。", reply_markup=make_markup([row_back("adm:plist:1")]))
                 return
@@ -1755,6 +2022,12 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         # 卡池导入：处理文本
         if kind == "cp_import":
             pid = state["data"].get("pid")
+            _ensure_default_tier(pid)
+            tier_row = cur.execute(
+                "SELECT id FROM product_tiers WHERE product_id=? ORDER BY COALESCE(sort,id) DESC, id DESC LIMIT 1",
+                (pid,),
+            ).fetchone()
+            default_tid = tier_row[0] if tier_row else None
             # 拆分行，去空白
             lines = [ln.strip() for ln in (text or "").splitlines()]
             lines = [ln for ln in lines if ln]
@@ -1768,11 +2041,11 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
                 exist_set = set(str(r[0]) for r in exist_rows)
             except Exception:
                 exist_set = set()
-            to_insert = [(pid, ln, int(time.time())) for ln in lines if ln not in exist_set]
+            to_insert = [(pid, default_tid, ln, int(time.time())) for ln in lines if ln not in exist_set]
             inserted = 0
             if to_insert:
                 try:
-                    cur.executemany("INSERT INTO card_keys(product_id, key_text, create_time) VALUES (?,?,?)", to_insert)
+                    cur.executemany("INSERT INTO card_keys(product_id, tier_id, key_text, create_time) VALUES (?,?,?,?)", to_insert)
                     conn.commit()
                     inserted = len(to_insert)
                 except Exception:
@@ -1875,6 +2148,112 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
             await adm_router(type("obj", (), {"callback_query": type("q", (), {"data": f"adm:plist:{page}"}), "effective_user": update.effective_user, "effective_chat": update.effective_chat, "get_bot": update.get_bot})(), ctx)
             return
 
+        if kind == "tier_new_name":
+            pid = state["data"].get("pid")
+            state["type"] = "tier_new_price"
+            state["data"]["name"] = text
+            await update.message.reply_text("请输入新档位【价格】（数字）：", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+            return
+
+        if kind == "tier_new_price":
+            pid = state["data"].get("pid")
+            try:
+                price = float(text)
+            except Exception:
+                await update.message.reply_text("格式不正确，请输入数字价格：", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+                return
+            state["data"]["price"] = price
+            state["type"] = "tier_new_deliver"
+            kb = make_markup([
+                [
+                    InlineKeyboardButton("👥 自动拉群", callback_data=f"adm:tier_new_deliver:{pid}:join_group"),
+                    InlineKeyboardButton("🧷 通用卡密/文本", callback_data=f"adm:tier_new_deliver:{pid}:card_fixed"),
+                ],
+                [InlineKeyboardButton("🔑 卡池", callback_data=f"adm:tier_new_deliver:{pid}:card_pool")],
+                row_back(f"adm:tiers:{pid}"),
+            ])
+            await update.message.reply_text("请选择新档位【发货方式】：", reply_markup=kb)
+            return
+
+        if kind == "tier_new_group":
+            pid = state["data"].get("pid")
+            gid = text
+            ok = gid.startswith("-100") or gid.lstrip("-").isdigit()
+            if not ok:
+                await update.message.reply_text("格式不正确，请输入正确的群组ID，例如 -1001234567890：", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+                return
+            ok_admin = await _check_and_warn_bot_admin(gid)
+            if not ok_admin:
+                await update.message.reply_text("已取消保存。请为机器人授予群管理员后重新输入。", reply_markup=make_markup([row_back(f"adm:tiers:{pid}")]))
+                return
+            cur.execute(
+                "INSERT INTO product_tiers(product_id, name, price, deliver_type, tg_group_id, card_fixed, status, sort, create_time) VALUES (?,?,?,?,?,?,?,?,?)",
+                (pid, state["data"].get("name"), state["data"].get("price"), "join_group", gid, "", "on", state["data"].get("sort") or int(time.time()), int(time.time())),
+            )
+            conn.commit()
+            ctx.user_data.pop("adm_wait", None)
+            await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 新档位已创建", ttl=2)
+            await _send_tiers_page(update.effective_chat.id, pid)
+            return
+
+        if kind and kind.startswith("tier_edit_"):
+            pid = state["data"].get("pid")
+            tid = state["data"].get("tid")
+            field = kind.replace("tier_edit_", "", 1)
+            if field == "price":
+                try:
+                    val = float(text)
+                except Exception:
+                    await update.message.reply_text("格式不正确，请输入数字价格：", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+                    return
+            else:
+                val = text
+            if field == "group":
+                ok_admin = await _check_and_warn_bot_admin(str(val))
+                if not ok_admin:
+                    await update.message.reply_text("已取消保存。请先将机器人设为该群管理员。")
+                    await _send_tier_page(update.effective_chat.id, pid, tid)
+                    return
+            col = {
+                "name": "name",
+                "price": "price",
+                "group": "tg_group_id",
+                "card_fixed": "card_fixed",
+            }.get(field)
+            if not col:
+                await update.message.reply_text("不支持的字段。", reply_markup=make_markup([row_back(f"adm:tier:{pid}:{tid}")]))
+                return
+            cur.execute(f"UPDATE product_tiers SET {col}=? WHERE id=? AND product_id=?", (val, tid, pid))
+            conn.commit()
+            ctx.user_data.pop("adm_wait", None)
+            await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存档位设置", ttl=2)
+            await _send_tier_page(update.effective_chat.id, pid, tid)
+            return
+
+        if kind == "tcp_import":
+            pid = state["data"].get("pid")
+            tid = state["data"].get("tid")
+            lines = [ln.strip() for ln in (text or "").splitlines()]
+            lines = [ln for ln in lines if ln]
+            if not lines:
+                await update.message.reply_text("未检测到有效内容，请重新粘贴。", reply_markup=make_markup([row_back(f"adm:tcard_pool:{pid}:{tid}:1")]))
+                return
+            try:
+                exist_rows = cur.execute("SELECT key_text FROM card_keys WHERE tier_id=?", (tid,)).fetchall()
+                exist_set = set(str(r[0]) for r in exist_rows)
+            except Exception:
+                exist_set = set()
+            to_insert = [(pid, tid, ln, int(time.time())) for ln in lines if ln not in exist_set]
+            inserted = 0
+            if to_insert:
+                cur.executemany("INSERT INTO card_keys(product_id, tier_id, key_text, create_time) VALUES (?,?,?,?)", to_insert)
+                conn.commit()
+                inserted = len(to_insert)
+            ctx.user_data.pop("adm_wait", None)
+            await send_ephemeral(update.get_bot(), update.effective_chat.id, f"✅ 导入完成，本次新增 {inserted} 条", ttl=3)
+            await adm_router(type("obj", (), {"callback_query": type("q", (), {"data": f"adm:tcard_pool:{pid}:{tid}:1"}), "effective_user": update.effective_user, "effective_chat": update.effective_chat, "get_bot": update.get_bot})(), ctx)
+            return
+
         # 新增商品流程：name -> price -> desc -> cover -> group -> save
         if kind == "pnew_name":
             state["type"] = "pnew_price"
@@ -1927,6 +2306,7 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
                 )
                 conn.commit()
                 pid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _ensure_default_tier(str(pid))
             except Exception:
                 kb = make_markup([row_home_admin()])
                 await update.message.reply_text("保存失败，请稍后重试。", reply_markup=kb)
@@ -1983,6 +2363,7 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
                 )
                 conn.commit()
                 pid = cur.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _ensure_default_tier(str(pid))
             except Exception:
                 await update.message.reply_text("保存失败，请稍后重试。")
                 return
