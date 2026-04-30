@@ -24,10 +24,10 @@
       "name": "KAVIP支付宝",
       "enabled": true,
       "priority": 30,
-      "merchant_id": "YOUR_KAVIP_MERCHANT_ID",
+      "merchant_id": "1023",
       "gateway": "https://kavip.biz/submit.php",
       "api_gateway": "https://kavip.biz/mapi.php",
-      "key": "YOUR_KAVIP_API_KEY",
+      "key": "76F67wdDD7p56l7g1F66wFTRLv7pd5rv",
       "type": "alipay",
       "route": "/pay/kavip"
     }
