@@ -281,6 +281,68 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
     # 简单的本地限流（按订单号）
     _recheck_cooldown: Dict[str, float] = {}
 
+    def _fmt_price(value) -> str:
+        try:
+            num = float(value)
+            if num.is_integer():
+                return str(int(num))
+            return f"{num:.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(value)
+
+    def _get_active_tiers(pid: str):
+        try:
+            return cur.execute(
+                """
+SELECT id, name, price, COALESCE(deliver_type,'join_group')
+FROM product_tiers
+WHERE product_id=? AND COALESCE(status,'on')='on'
+ORDER BY COALESCE(sort, id) DESC, id DESC
+""",
+                (pid,),
+            ).fetchall()
+        except Exception:
+            return []
+
+    def _get_tier_context(pid: str, tier_id: str | None = None):
+        if tier_id:
+            row = cur.execute(
+                """
+SELECT p.name, p.full_description, p.cover_url, t.id, t.name, t.price
+FROM products p
+JOIN product_tiers t ON t.product_id=p.id
+WHERE p.id=? AND t.id=? AND COALESCE(p.status,'on')='on' AND COALESCE(t.status,'on')='on'
+""",
+                (pid, tier_id),
+            ).fetchone()
+            if row:
+                return row
+        row = cur.execute(
+            """
+SELECT p.name, p.full_description, p.cover_url, t.id, t.name, t.price
+FROM products p
+LEFT JOIN product_tiers t ON t.id = (
+    SELECT id FROM product_tiers
+    WHERE product_id=p.id AND COALESCE(status,'on')='on'
+    ORDER BY COALESCE(sort, id) DESC, id DESC
+    LIMIT 1
+)
+WHERE p.id=? AND COALESCE(p.status,'on')='on'
+""",
+            (pid,),
+        ).fetchone()
+        if row and row[3] is not None:
+            return row
+        legacy = cur.execute(
+            "SELECT name, full_description, cover_url, NULL, '默认档位', price FROM products WHERE id=? AND COALESCE(status,'on')='on'",
+            (pid,),
+        ).fetchone()
+        return legacy
+
+    def _payment_subject(product_name: str, tier_name: str | None) -> str:
+        tier = (tier_name or "").strip()
+        return f"{product_name} - {tier}" if tier else product_name
+
     async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # 直接显示主页
         await render_home(
@@ -353,7 +415,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
         await query.answer()
         _, pid = query.data.split(":")
         row = cur.execute(
-            "SELECT name, full_description, price, cover_url FROM products WHERE id=? AND status='on'",
+            "SELECT name, full_description, cover_url FROM products WHERE id=? AND status='on'",
             (pid,),
         ).fetchone()
         if not row:
@@ -366,11 +428,21 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             except Exception:
                 pass
             return
-        name, full_desc, price, cover = row
+        name, full_desc, cover = row
+        tiers = _get_active_tiers(pid)
         img = cover
-        rows = [[InlineKeyboardButton("🛒 购买", callback_data=f"buy:{pid}")], row_back("show:list")]
+        tier_lines = []
+        rows = []
+        if tiers:
+            for tid, tier_name, tier_price, _dt in tiers:
+                tier_lines.append(f"- {tier_name}：¥{_fmt_price(tier_price)}")
+                rows.append([InlineKeyboardButton(f"{tier_name} ¥{_fmt_price(tier_price)}", callback_data=f"buy:{pid}:{tid}")])
+        else:
+            rows.append([InlineKeyboardButton("🛒 购买", callback_data=f"buy:{pid}")])
+        rows.append(row_back("show:list"))
         kb = InlineKeyboardMarkup(rows)
-        caption = f" {name}\n\n{full_desc}\n\n💰 价格：¥{price}"
+        price_text = "\n".join(tier_lines) if tier_lines else "暂无可购买档位"
+        caption = f" {name}\n\n{full_desc}\n\n💰 价格档位：\n{price_text}"
         try:
             await query.edit_message_media(
                 media=InputMediaPhoto(media=img, caption=caption), reply_markup=kb
@@ -400,8 +472,10 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
     async def cb_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        _, pid = query.data.split(":")
-        row = cur.execute("SELECT name, price, cover_url FROM products WHERE id=? AND status='on'", (pid,)).fetchone()
+        parts = query.data.split(":")
+        pid = parts[1]
+        tier_id = parts[2] if len(parts) > 2 else None
+        row = _get_tier_context(pid, tier_id)
         if not row:
             try:
                 await _delete_last_and_send_text(
@@ -412,7 +486,8 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             except Exception:
                 pass
             return
-        name, price, cover = row
+        name, _full_desc, cover, tier_id, tier_name, price = row
+        subject = _payment_subject(name, tier_name)
         # 读取后台配置的列数：settings(ui.payment_cols) -> START_CFG.payment_cols -> 默认3；限定 1~4 列
         try:
             cols_raw = _get_setting("ui.payment_cols", (START_CFG.get("payment_cols") or 3))
@@ -422,7 +497,8 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
         cols = max(1, min(4, cols))
         # 检查是否只有一个启用的支付方式
         first_payment = get_first_enabled_payment(PAYCFG, get_setting_func=_get_setting)
-        payment_rows = build_payment_rows(PAYCFG, pid=pid, get_setting_func=_get_setting, callback_fmt="pay:{pid}:{channel}", max_cols=cols, skip_single=True)
+        pay_pid = f"{pid}:{tier_id}" if tier_id else pid
+        payment_rows = build_payment_rows(PAYCFG, pid=pay_pid, get_setting_func=_get_setting, callback_fmt="pay:{pid}:{channel}", max_cols=cols, skip_single=True)
         
         # 如果只有一个支付方式，直接跳转到支付
         if not payment_rows and first_payment:
@@ -435,7 +511,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             
             fake_update = Update(
                 update_id=update.update_id,
-                callback_query=FakeQuery(f"pay:{pid}:{first_payment}")
+                callback_query=FakeQuery(f"pay:{pid}:{tier_id}:{first_payment}" if tier_id else f"pay:{pid}:{first_payment}")
             )
             fake_update._effective_chat = update.effective_chat
             fake_update._effective_user = update.effective_user
@@ -446,7 +522,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
         # 多个支付方式时显示选择界面
         rows = payment_rows
         rows.append(row_back(f"detail:{pid}"))
-        caption = f"商品：{name}\n价格：¥{price}\n💳 请选择支付方式："
+        caption = f"商品：{subject}\n价格：¥{_fmt_price(price)}\n💳 请选择支付方式："
         if cover:
             try:
                 await _delete_last_and_send_photo(
@@ -489,14 +565,15 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
         except Exception as e:
             return False, None, str(e)
 
-    async def _preload_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, channel: str):
+    async def _preload_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, tier_id: str | None, channel: str):
         """后台预加载支付订单（不显示给用户）"""
         try:
             # 生成订单但不发送消息
-            row = cur.execute("SELECT name, price, cover_url FROM products WHERE id=? AND status='on'", (pid,)).fetchone()
+            row = _get_tier_context(pid, tier_id)
             if not row:
                 return
-            name, price, cover = row
+            name, _detail, cover, tier_id, tier_name, price = row
+            subject = _payment_subject(name, tier_name)
             
             # 人民币通道最小金额前置校验
             try:
@@ -530,13 +607,13 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                 out_trade_no = f"{_rand36(6)}-{str(int(time.time()))[-5:]}"
             
             # 创建支付链接
-            ok, pay_url, err = create_payment(channel, name, price, out_trade_no)
+            ok, pay_url, err = create_payment(channel, subject, price, out_trade_no)
             if ok:
                 # ✅ 修复：立即保存到数据库，避免支付回调时找不到订单
                 try:
                     cur.execute(
-                        "INSERT INTO orders (user_id, product_id, amount, payment_method, out_trade_no, create_time) VALUES (?,?,?,?,?,?)",
-                        (update.effective_user.id, pid, price, channel, out_trade_no, int(time.time())),
+                        "INSERT INTO orders (user_id, product_id, tier_id, amount, payment_method, out_trade_no, create_time) VALUES (?,?,?,?,?,?,?)",
+                        (update.effective_user.id, pid, tier_id, price, channel, out_trade_no, int(time.time())),
                     )
                     conn.commit()
                     
@@ -554,11 +631,12 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                     ctx.user_data["preloaded_order"] = {
                         "out_trade_no": out_trade_no,
                         "pay_url": pay_url,
-                        "name": name,
+                        "name": subject,
                         "price": price,
                         "cover": cover,
                         "channel": channel,
-                        "pid": pid
+                        "pid": pid,
+                        "tier_id": str(tier_id) if tier_id is not None else None,
                     }
                     print(f"✅ 订单预加载成功并已保存到数据库: {out_trade_no}")
                 except Exception as e:
@@ -577,16 +655,24 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             pass
         
         # 从callback_data中获取商品ID和支付渠道
-        _, pid, channel = query.data.split(":")
+        parts = query.data.split(":")
+        if len(parts) >= 4:
+            _, pid, tier_id, channel = parts[:4]
+        else:
+            _, pid, channel = parts
+            tier_id = None
+        tier_ctx = _get_tier_context(pid, tier_id)
+        if tier_ctx:
+            tier_id = tier_ctx[3]
         
         # 检查是否有预加载的订单
         preloaded = ctx.user_data.get("preloaded_order")
-        if preloaded and preloaded.get("pid") == pid and preloaded.get("channel") == channel:
+        if preloaded and preloaded.get("pid") == pid and preloaded.get("channel") == channel and str(preloaded.get("tier_id")) == str(tier_id):
             # ✅ 修复：预加载订单已经在数据库中，直接显示即可
             print(f"⚡ 使用预加载订单（已在数据库）: {preloaded['out_trade_no']}")
             
             # 显示订单（复用 _create_payment_order 中的显示逻辑）
-            await _create_payment_order(update, ctx, pid, channel, use_preloaded=preloaded)
+            await _create_payment_order(update, ctx, pid, tier_id, channel, use_preloaded=preloaded)
             
             # 清理预加载数据
             ctx.user_data.pop("preloaded_order", None)
@@ -594,7 +680,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
         else:
             # 预加载失败或数据不匹配，重新创建订单
             print("⚠️ 预加载订单不可用，重新创建")
-            await _create_payment_order(update, ctx, pid, channel)
+            await _create_payment_order(update, ctx, pid, tier_id, channel)
 
     @rate_limit_user_payment
     async def cb_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -603,7 +689,15 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             await query.answer()
         except Exception:
             pass
-        _, pid, channel = query.data.split(":")
+        parts = query.data.split(":")
+        if len(parts) >= 4:
+            _, pid, tier_id, channel = parts[:4]
+        else:
+            _, pid, channel = parts
+            tier_id = None
+        tier_ctx = _get_tier_context(pid, tier_id)
+        if tier_ctx:
+            tier_id = tier_ctx[3]
         
         # 检查该支付方式是否启用公告
         announcement_enabled = _get_setting(f"announcement.{channel}.enabled", "true") == "true"
@@ -649,12 +743,13 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                     )
             
             # 保存支付信息到用户数据，用于后续处理
-            ctx.user_data["pending_payment"] = {"pid": pid, "channel": channel}
+            ctx.user_data["pending_payment"] = {"pid": pid, "tier_id": str(tier_id) if tier_id is not None else None, "channel": channel}
             
             # 后台异步开始生成订单（不等待完成）
-            asyncio.create_task(_preload_payment_order(update, ctx, pid, channel))
+            asyncio.create_task(_preload_payment_order(update, ctx, pid, tier_id, channel))
             
-            kb = make_markup([[InlineKeyboardButton("✅ 我知道了，继续支付", callback_data=f"pay_ack:{pid}:{channel}")]])
+            ack_cb = f"pay_ack:{pid}:{tier_id}:{channel}" if tier_id else f"pay_ack:{pid}:{channel}"
+            kb = make_markup([[InlineKeyboardButton("✅ 我知道了，继续支付", callback_data=ack_cb)]])
             
             try:
                 await _delete_last_and_send_text(
@@ -667,11 +762,11 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             return
         
         # 公告未启用，直接创建订单
-        await _create_payment_order(update, ctx, pid, channel)
+        await _create_payment_order(update, ctx, pid, tier_id, channel)
 
-    async def _create_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, channel: str, use_preloaded: dict = None):
+    async def _create_payment_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pid: str, tier_id: str | None, channel: str, use_preloaded: dict = None):
         """创建支付订单的核心逻辑"""
-        row = cur.execute("SELECT name, price, cover_url FROM products WHERE id=? AND status='on'", (pid,)).fetchone()
+        row = _get_tier_context(pid, tier_id)
         if not row:
             try:
                 await _delete_last_and_send_text(
@@ -682,7 +777,8 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             except Exception:
                 pass
             return
-        name, price, cover = row
+        name, detail, cover, tier_id, tier_name, price = row
+        subject = _payment_subject(name, tier_name)
         
         # 先显示"正在生成"提示，保持用户体验一致
         try:
@@ -707,7 +803,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                     await _delete_last_and_send_text(
                         update.effective_chat.id,
                         "❌ 该通道最小支付金额为 3.00 元，请返回重新选择支付方式或购买金额≥3.00 的商品。",
-                        reply_markup=make_markup([row_back(f"buy:{pid}")])
+                        reply_markup=make_markup([row_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}")])
                     )
                     return
             except Exception:
@@ -736,13 +832,13 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             else:
                 # 极端情况下仍碰撞，退回到时间戳方案
                 out_trade_no = f"{_rand36(6)}-{str(int(time.time()))[-5:]}"
-            ok, pay_url, err = create_payment(channel, name, price, out_trade_no)
+            ok, pay_url, err = create_payment(channel, subject, price, out_trade_no)
             if not ok:
                 try:
                     await _delete_last_and_send_text(
                         update.effective_chat.id,
                         f"❌ 下单失败：{err}\n请稍后重试，或返回重新选择支付方式。",
-                        reply_markup=make_markup([row_back(f"buy:{pid}")])
+                        reply_markup=make_markup([row_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}")])
                     )
                 except Exception:
                     pass
@@ -753,8 +849,8 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                 existing = cur.execute("SELECT 1 FROM orders WHERE out_trade_no=? LIMIT 1", (out_trade_no,)).fetchone()
                 if not existing:
                     cur.execute(
-                        "INSERT INTO orders (user_id, product_id, amount, payment_method, out_trade_no, create_time) VALUES (?,?,?,?,?,?)",
-                        (update.effective_user.id, pid, price, channel, out_trade_no, int(time.time())),
+                        "INSERT INTO orders (user_id, product_id, tier_id, amount, payment_method, out_trade_no, create_time) VALUES (?,?,?,?,?,?,?)",
+                        (update.effective_user.id, pid, tier_id, price, channel, out_trade_no, int(time.time())),
                     )
                     conn.commit()
                     
@@ -820,9 +916,9 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                     
                     caption = (
                         f"🧾 订单号：{out_trade_no}\n"
-                        f"📦 商品名：{name}\n"
+                        f"📦 商品名：{subject}\n"
                         f"📝 商品详情：{detail}\n"
-                        f"💰 价格：¥{price}\n"
+                        f"💰 价格：¥{_fmt_price(price)}\n"
                         f"💳 支付方式：{method_name}\n"
                         f"📍 USDT钱包地址：`{usdt_address}`\n"
                         f"⏱️ 订单有效期约 {mins} 分钟，超时将自动取消。\n\n"
@@ -847,9 +943,9 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             
             caption = (
                 f"🧾 订单号：{out_trade_no}\n"
-                f"📦 商品名：{name}\n"
+                f"📦 商品名：{subject}\n"
                 f"📝 商品详情：{detail}\n"
-                f"💰 价格：¥{price}\n"
+                f"💰 价格：¥{_fmt_price(price)}\n"
                 f"💳 支付方式：{method_name}\n"
                 f"📍 USDT钱包地址：`{usdt_address}`\n"
                 f"🔗 支付链接：{pay_url}\n"
@@ -883,7 +979,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                     update.effective_chat.id,
                     InputFile(bio),
                     caption=(
-                        f"📷 请扫码支付 ¥{price}\n"
+                        f"📷 请扫码支付 ¥{_fmt_price(price)}\n"
                         f"🧾 订单号：{out_trade_no}\n"
                         f"⏱️ 订单有效期约 {max(1, get_payment_timeout_seconds(channel) // 60)} 分钟，超时将自动取消。\n"
                         f"提示：支付成功后我会自动发送自动拉群邀请链接。"
@@ -897,9 +993,9 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                 
                 caption = (
                     f"🧾 订单号：{out_trade_no}\n"
-                    f"📦 商品名：{name}\n"
+                    f"📦 商品名：{subject}\n"
                     f"📝 商品详情：{detail}\n"
-                    f"💰 价格：¥{price}\n"
+                    f"💰 价格：¥{_fmt_price(price)}\n"
                     f"💳 支付方式：{method_name}\n"
                     f"🔗 支付链接：{pay_url}\n"
                     f"⏱️ 订单有效期约 {mins} 分钟，超时将自动取消。\n\n"
@@ -1092,13 +1188,13 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
         _recheck_cooldown[out_trade_no] = now
 
         row = cur.execute(
-            "SELECT id, user_id, product_id, status, create_time, payment_method FROM orders WHERE out_trade_no=?",
+            "SELECT id, user_id, product_id, status, create_time, payment_method, tier_id FROM orders WHERE out_trade_no=?",
             (out_trade_no,)
         ).fetchone()
         if not row:
             await send_ephemeral(application.bot, update.effective_user.id, "未找到该订单，请返回重试。")
             return
-        oid, uid, pid, status, create_ts, payment_method = row
+        oid, uid, pid, status, create_ts, payment_method, tier_id = row
         # 仅允许下单用户查询
         if int(uid) != int(update.effective_user.id):
             await send_ephemeral(application.bot, update.effective_user.id, "❌ 无权操作此订单")
@@ -1106,12 +1202,27 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
 
         # 如果已支付/完成，根据商品发货方式处理：卡密或自动拉群
         if status in ("paid", "completed"):
-            # 查询商品发货方式
+            # 查询档位发货方式
             try:
-                prow = cur.execute("SELECT deliver_type, name, card_fixed FROM products WHERE id=?", (pid,)).fetchone()
+                prow = cur.execute(
+                    """
+SELECT COALESCE(t.deliver_type, p.deliver_type, 'join_group'),
+       p.name,
+       COALESCE(t.card_fixed, p.card_fixed, ''),
+       COALESCE(t.name, '')
+FROM products p
+LEFT JOIN product_tiers t ON t.id=?
+WHERE p.id=?
+""",
+                    (tier_id, pid),
+                ).fetchone()
             except Exception:
                 prow = None
-            deliver_type, pname, card_fixed_val = (prow[0] if prow else None), (prow[1] if prow else "商品"), (prow[2] if prow else None)
+            deliver_type = prow[0] if prow else None
+            base_name = prow[1] if prow else "商品"
+            card_fixed_val = prow[2] if prow else None
+            tier_name = prow[3] if prow else ""
+            pname = f"{base_name} - {tier_name}" if tier_name else base_name
             dt = (deliver_type or 'join_group').strip().lower()
 
             if dt in ("card_fixed", "card_pool"):
@@ -1122,7 +1233,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
                         if dt == "card_fixed":
                             card_text = (card_fixed_val or "").strip()
                         else:
-                            row_key = cur.execute("SELECT key_text FROM card_keys WHERE used_by_order_id=? LIMIT 1", (oid,)).fetchone()
+                            row_key = cur.execute("SELECT key_text FROM card_keys WHERE used_by_order_id=? AND tier_id=? LIMIT 1", (oid, tier_id)).fetchone()
                             card_text = (row_key[0] if row_key else None)
                         if card_text:
                             msg = (
@@ -1313,11 +1424,17 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             name = None
             try:
                 prow = cur.execute(
-                    "SELECT name FROM products WHERE id=(SELECT product_id FROM orders WHERE id=?)",
+                    """
+SELECT p.name, t.name
+FROM orders o
+LEFT JOIN products p ON p.id=o.product_id
+LEFT JOIN product_tiers t ON t.id=o.tier_id
+WHERE o.id=?
+""",
                     (order_id,),
                 ).fetchone()
                 if prow:
-                    name = prow[0]
+                    name = f"{prow[0]} - {prow[1]}" if prow[1] else prow[0]
             except Exception:
                 pass
             out_trade_no = None

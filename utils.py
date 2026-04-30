@@ -116,11 +116,27 @@ async def render_home(
         cover = None
 
     try:
-        rows: List[Tuple[int, str, float]] = cur.execute(
-            "SELECT id, name, price FROM products WHERE status='on'"
+        rows: List[Tuple[int, str, float, float, int]] = cur.execute(
+            """
+SELECT p.id,
+       p.name,
+       COALESCE(MIN(CASE WHEN COALESCE(t.status,'on')='on' THEN t.price END), p.price) AS min_price,
+       COALESCE(MAX(CASE WHEN COALESCE(t.status,'on')='on' THEN t.price END), p.price) AS max_price,
+       COUNT(CASE WHEN COALESCE(t.status,'on')='on' THEN 1 END) AS tier_count
+FROM products p
+LEFT JOIN product_tiers t ON t.product_id = p.id
+WHERE COALESCE(p.status,'on')='on'
+GROUP BY p.id, p.name, p.price
+ORDER BY COALESCE(p.sort, p.id) DESC, p.id DESC
+"""
         ).fetchall()
     except Exception:
-        rows = []
+        try:
+            rows = [(pid, name, price, price, 1) for pid, name, price in cur.execute(
+                "SELECT id, name, price FROM products WHERE status='on'"
+            ).fetchall()]
+        except Exception:
+            rows = []
 
     # 每行商品数：从 settings 读取，可选 1-4，默认 2
     try:
@@ -138,7 +154,11 @@ async def render_home(
 
     buttons: List[List[InlineKeyboardButton]] = []
     row_btn: List[InlineKeyboardButton] = []
-    for pid, name, price in rows:
+    for pid, name, min_price, max_price, tier_count in rows:
+        if int(tier_count or 0) > 1 and float(min_price or 0) != float(max_price or 0):
+            price = f"{min_price}-{max_price}"
+        else:
+            price = min_price
         try:
             label = str(btn_tpl).replace("{name}", str(name)).replace("{price}", str(price))
         except Exception:
