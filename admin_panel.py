@@ -665,12 +665,8 @@ WHERE t.product_id=? AND t.id=?
             # 获取支付方式排序
             def get_payment_order():
                 allowed_channels = [
-                    "alipay",
                     "kavip_alipay",
-                    "wxpay",
-                    "usdt_lemon",
-                    "usdt_token188",
-                    "usdt_trc20_direct",
+                    "usdt_trc20_direct"
                 ]
                 order_str = _get_setting(
                     "payment.order",

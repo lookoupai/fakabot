@@ -35,7 +35,7 @@
     },
     "usdt_trc20_direct": {
       "name": "USDT(TRC20直付)",
-      "enabled": false,
+      "enabled": true,
       "priority": 40,
       "tron_api_key": "a2b8a83f-61d2-4dd6-afe1-479f323459f9",
       "timeout_seconds": 3600,
