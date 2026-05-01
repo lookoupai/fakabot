@@ -3,7 +3,7 @@
   "ADMIN_ID": 8755978774,
   "DOMAIN": "https://your-public-domain.example",
   "ORDER_TIMEOUT_SECONDS": 3600,
-  "USE_WEBHOOK": true,
+  "USE_WEBHOOK": false,
   "WEBHOOK_PATH": "/tg/webhook",
   "PAYMENTS": {
     "alipay": {
