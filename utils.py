@@ -104,6 +104,7 @@ async def render_home(
     language: str = "zh",
     get_product_text: Optional[_GetProductText] = None,
     show_language_switch: bool = False,
+    show_support_button: bool = False,
 ):
     """渲染首页（封面 + 标题/简介 + 商品按钮）。
     所有依赖通过参数传入，方便在不同模块中复用。
@@ -193,6 +194,9 @@ ORDER BY COALESCE(p.sort, p.id) DESC, p.id DESC
     if row_btn:
         buttons.append(row_btn)
 
+    if show_support_button:
+        buttons.append([InlineKeyboardButton(t("common.support", lang), callback_data="support")])
+
     if show_language_switch:
         buttons.append([
             InlineKeyboardButton(language_button_label("zh", lang), callback_data="lang:zh"),
@@ -204,8 +208,6 @@ ORDER BY COALESCE(p.sort, p.id) DESC, p.id DESC
         for r in extra_rows:
             if isinstance(r, list) and r:
                 buttons.append(r)
-
-    # 客服入口改为独立命令 /support，此处不再在首页展示按钮
 
     caption = f"{title}\n\n{intro}\n\n{t('home.choose_product', lang)}"
 
@@ -387,11 +389,15 @@ def rows_pay_console(
     *,
     recheck_label: str = "🔄 我已支付，重新检查",
     cancel_label: str = "❌ 取消本次付款",
+    support_label: Optional[str] = None,
 ) -> List[List[InlineKeyboardButton]]:
-    return [[
+    rows = [[
         InlineKeyboardButton(recheck_label, callback_data=f"recheck:{otn}"),
         InlineKeyboardButton(cancel_label, callback_data=f"ask:cancel:{otn}"),
     ]]
+    if support_label:
+        rows.append([InlineKeyboardButton(support_label, callback_data="support")])
+    return rows
 
 # 通用确认对话行：yes/no 两个按钮在同一行
 def build_confirm_rows(yes_cb: str, no_cb: str, yes_label: str = "✅ 确定", no_label: str = "↩️ 返回") -> List[List[InlineKeyboardButton]]:

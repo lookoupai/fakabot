@@ -355,6 +355,7 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             language=selected,
             get_product_text=_product_text,
             show_language_switch=True,
+            show_support_button=True,
         )
 
     def _fmt_price(value) -> str:
@@ -365,6 +366,37 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             return f"{num:.2f}".rstrip("0").rstrip(".")
         except Exception:
             return str(value)
+
+    def _add_alipay_icon_under_qr(qr_img, channel: str):
+        if channel not in {"alipay", "kavip_alipay"}:
+            return qr_img
+        try:
+            from PIL import Image
+
+            icon_path = os.path.join(os.path.dirname(__file__), "assets", "alipay.png")
+            if not os.path.exists(icon_path):
+                return qr_img
+
+            qr_base = qr_img.convert("RGB")
+            icon = Image.open(icon_path).convert("RGBA")
+            max_icon_width = max(1, int(qr_base.width * 0.48))
+            max_icon_height = max(1, int(qr_base.height * 0.18))
+            icon.thumbnail((max_icon_width, max_icon_height))
+
+            top_padding = max(12, int(qr_base.height * 0.04))
+            bottom_padding = max(12, int(qr_base.height * 0.04))
+            canvas_width = qr_base.width
+            canvas_height = qr_base.height + top_padding + icon.height + bottom_padding
+            canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
+            canvas.paste(qr_base, (0, 0))
+
+            icon_x = (canvas_width - icon.width) // 2
+            icon_y = qr_base.height + top_padding
+            canvas.paste(icon, (icon_x, icon_y), icon)
+            return canvas
+        except Exception as e:
+            print(f"支付宝二维码图标合成失败，使用原二维码: {e}")
+            return qr_img
 
     def _get_active_tiers(pid: str):
         try:
@@ -801,6 +833,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                 otn,
                 recheck_label=t("payment.recheck_button", lang),
                 cancel_label=t("payment.cancel_button", lang),
+                support_label=t("common.support", lang),
             ))
         def _with_payment_notice(text: str) -> str:
             notice = (payment_notice or "").strip()
@@ -900,6 +933,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             # 传统支付方式显示
             if SHOW_QR:
                 qr_img = qrcode.make(pay_url)
+                qr_img = _add_alipay_icon_under_qr(qr_img, channel)
                 bio = BytesIO()
                 bio.name = "qrcode.png"
                 qr_img.save(bio, "PNG")
@@ -1078,6 +1112,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                         otn,
                         recheck_label=t("payment.recheck_button", lang),
                         cancel_label=t("payment.cancel_button", lang),
+                        support_label=t("common.support", lang),
                     )))
                 except Exception:
                     pass
@@ -1102,6 +1137,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                         otn,
                         recheck_label=t("payment.recheck_button", lang),
                         cancel_label=t("payment.cancel_button", lang),
+                        support_label=t("common.support", lang),
                     )))
                 except Exception:
                     pass
@@ -1395,12 +1431,14 @@ WHERE o.id=?
                     uname = f"@{uobj.username}"
             except Exception:
                 pass
-            try:
-                title = name or "群组"
-                user_msg = t("delivery.group_success", user_lang, title=title)
-                await _delete_last_and_send_text(target_uid, user_msg)
-            except Exception:
-                pass
+            title = name or "群组"
+            # 用户已通过邀请链接进入群组，不再额外发送进群成功私聊。
+            # 如后续需要恢复提示，取消下面代码注释即可。
+            # try:
+            #     user_msg = t("delivery.group_success", user_lang, title=title)
+            #     await _delete_last_and_send_text(target_uid, user_msg)
+            # except Exception:
+            #     pass
             try:
                 admin_msg = (
                     f"[成交通知]\n"

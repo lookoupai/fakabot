@@ -14,6 +14,7 @@ from utils import STATUS_ZH
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters, Application
 from utils import render_home
 from utils import parse_date as _parse_date, fmt_ts as _fmt_ts, to_base36 as _to_base36, bar as _bar
+from i18n import t
 
 # 该模块通过依赖注入方式复用主程序的资源，避免循环依赖
 # 使用方式：在 bot.py 中调用 register_admin_handlers(application, deps)
@@ -1293,31 +1294,10 @@ WHERE t.product_id=? AND t.id=?
             
             if announcement_type == "usdt":
                 title = "USDT支付公告"
-                default_text = (
-                    "📢 USDT支付重要提醒\n\n\n"
-                    "⚠️ 请注意手续费问题\n\n"
-                    "🏦 交易所转账（火币/欧易/币安）\n"
-                    "   会扣 1U 手续费\n"
-                    "   商品价格 10U → 请转 11U\n"
-                    "   否则到账不足，无法自动拉群\n\n"
-                    "💳 钱包转账（推荐 ✅）\n"
-                    "   支持 Bitpie / TP / imToken 等钱包\n"
-                    "   直接按商品金额转（例：10U 转 10U）\n"
-                    "   钱包自动扣矿工费，到账准确，更省钱！\n\n"
-                    "⚡️ 付款即发货，1-3分钟快速到账\n"
-                    "   机器人自动拉你进会员群 ✅"
-                )
+                default_text = t("announcement.usdt_default", "zh")
             else:
                 title = "支付宝/微信支付公告"
-                default_text = (
-                    "📢 欢迎光临官方商店\n\n\n"
-                    "💳 微信 / 支付宝付款说明\n\n"
-                    "✅ 按提示金额准确付款即可\n"
-                    "✅ 支持微信扫码、支付宝扫码\n"
-                    "✅ 付款后请勿关闭页面\n\n"
-                    "⚡️ 付款即发货，1-3分钟快速到账\n"
-                    "   机器人自动拉你进会员群 ✅"
-                )
+                default_text = t("announcement.rmb_default", "zh")
             
             ctx.user_data["adm_wait"] = {"type": "announcement_text", "data": {"announcement_type": announcement_type}}
             kb = make_markup([
@@ -1350,10 +1330,10 @@ WHERE t.product_id=? AND t.id=?
             await _send_text(update.effective_chat.id, "✅ 已恢复默认公告")
             await asyncio.sleep(1)
             
-            # 返回公告设置页
+            # 返回当前编辑页，立即展示“当前使用默认公告”的预览
             await adm_router(
                 type("obj", (), {
-                    "callback_query": type("q", (), {"data": "adm:announcement"})(),
+                    "callback_query": type("q", (), {"data": f"adm:announcement_edit:{announcement_type}"})(),
                     "effective_user": update.effective_user,
                     "effective_chat": update.effective_chat,
                     "get_bot": update.get_bot
