@@ -60,5 +60,7 @@ temp/
 # Screenshots
 screenshots/
 *.png
+!assets/
+!assets/**/*.png
 *.jpg
 *.jpeg
