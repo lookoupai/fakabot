@@ -699,13 +699,12 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         if not announcement_enabled:
             return ""
 
-        is_usdt = channel in ["usdt", "usdt_trc20_direct", "usdt_token188", "usdt_lemon"]
-        if is_usdt:
-            custom_announcement = (_get_setting("announcement.usdt.text", "")).strip()
-            default_announcement = t("announcement.usdt_default", lang)
-        else:
-            custom_announcement = (_get_setting("announcement.alipay_wxpay.text", "")).strip()
-            default_announcement = t("announcement.rmb_default", lang)
+        default_keys = {
+            "kavip_alipay": "announcement.kavip_alipay_default",
+            "usdt_trc20_direct": "announcement.usdt_trc20_direct_default",
+        }
+        custom_announcement = (_get_setting(f"announcement.{channel}.text", "")).strip()
+        default_announcement = t(default_keys.get(channel, "announcement.kavip_alipay_default"), lang)
 
         return (custom_announcement or default_announcement or "").strip()
 
@@ -932,17 +931,17 @@ WHERE status='pending'
             qr_img.save(bio, "PNG")
             bio.seek(0)
 
-            caption = _with_payment_notice(
+            base_caption = (
                 f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
                 f"{t('payment.product_name', lang, subject=subject)}\n"
                 f"{t('payment.product_detail', lang, detail=detail)}\n"
                 f"{t('payment.usdt_direct_amount', lang, amount=pay_amount)}\n"
                 f"{t('payment.method', lang, method=method_name)}\n"
                 f"{t('payment.wallet', lang, address=usdt_address)}\n"
-                f"{t('payment.timeout', lang, minutes=mins)}\n\n"
-                f"{t('payment.usdt_direct_network_hint', lang)}\n"
-                f"{t('payment.usdt_direct_qr_hint', lang)}"
+                f"{t('payment.timeout', lang, minutes=mins)}"
             )
+            usdt_notice = (payment_notice or "").strip()
+            caption = f"{base_caption}\n\n{usdt_notice}" if usdt_notice else base_caption
             await _delete_last_and_send_photo(
                 update.effective_chat.id,
                 InputFile(bio),

@@ -1,27 +1,11 @@
 {
-  "BOT_TOKEN": "8624850917:AAFl8-_VzBJLZ5cUBW01nF9LOK9hvpYYjME",
+  "BOT_TOKEN": "",
   "ADMIN_ID": 8755978774,
-  "DOMAIN": "https://your-public-domain.example",
+  "DOMAIN": "https://pay.unishopasa.cn/bot1",
   "ORDER_TIMEOUT_SECONDS": 3600,
   "USE_WEBHOOK": false,
   "WEBHOOK_PATH": "/tg/webhook",
   "PAYMENTS": {
-    "alipay": {
-      "name": "支付宝",
-      "merchant_id": "1023",
-      "gateway": "https://your-gateway.example/submit.php",
-      "key": "76F67wdDD7p56l7g1F66wFTRLv7pd5rv",
-      "type": "alipay",
-      "route": "/pay/yipay"
-    },
-    "wxpay": {
-      "name": "微信",
-      "merchant_id": "YOUR_MERCHANT_ID",
-      "gateway": "https://your-gateway.example/submit.php",
-      "key": "YOUR_API_KEY",
-      "type": "wxpay",
-      "route": "/pay/yipay"
-    },
     "kavip_alipay": {
       "name": "KAVIP支付宝",
       "enabled": true,

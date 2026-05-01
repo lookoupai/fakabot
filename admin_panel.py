@@ -95,6 +95,18 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         """USDT直付收款地址只允许从后台设置读取。"""
         return (_get_setting("payment.usdt_trc20_direct.monitor_address", "") or "").strip()
 
+    payment_channels = ["kavip_alipay", "usdt_trc20_direct"]
+    payment_default_order = "kavip_alipay,usdt_trc20_direct"
+    payment_names = {
+        "kavip_alipay": "支付宝",
+        "usdt_trc20_direct": "USDT(TRC20直付)",
+    }
+
+    announcement_channels = [
+        ("kavip_alipay", "支付宝公告", "announcement.kavip_alipay_default"),
+        ("usdt_trc20_direct", "USDT(TRC20直付)公告", "announcement.usdt_trc20_direct_default"),
+    ]
+
     def _ensure_i18n_tables():
         try:
             cur.execute(
@@ -664,43 +676,21 @@ WHERE t.product_id=? AND t.id=?
             
             # 获取支付方式排序
             def get_payment_order():
-                allowed_channels = [
-                    "kavip_alipay",
-                    "usdt_trc20_direct"
-                ]
-                order_str = _get_setting(
-                    "payment.order",
-                    "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
-                )
-                order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
-                for ch in allowed_channels:
+                order_str = _get_setting("payment.order", payment_default_order)
+                order_list = [ch for ch in order_str.split(",") if ch in payment_channels]
+                for ch in payment_channels:
                     if ch not in order_list:
                         order_list.append(ch)
                 return order_list
             
             def get_payment_name(channel):
-                names = {
-                    "alipay": "支付宝",
-                    "kavip_alipay": "KAVIP支付宝",
-                    "wxpay": "微信", 
-                    "usdt_lemon": "USDT (柠檬)",
-                    "usdt_token188": "USDT(TRC20)",
-                    "usdt_trc20_direct": "USDT(TRC20直付)"
-                }
-                return names.get(channel, channel)
+                return payment_names.get(channel, channel)
             
             # 按照保存的顺序显示支付方式
             payment_order = get_payment_order()
             
             for i, channel in enumerate(payment_order):
-                if channel not in [
-                    "alipay",
-                    "kavip_alipay",
-                    "wxpay",
-                    "usdt_lemon",
-                    "usdt_token188",
-                    "usdt_trc20_direct",
-                ]:
+                if channel not in payment_channels:
                     continue
                     
                 name = get_payment_name(channel)
@@ -841,20 +831,9 @@ WHERE t.product_id=? AND t.id=?
             channel = parts[2] if len(parts) > 2 else ""
             if channel:
                 # 获取当前排序
-                allowed_channels = [
-                    "alipay",
-                    "kavip_alipay",
-                    "wxpay",
-                    "usdt_lemon",
-                    "usdt_token188",
-                    "usdt_trc20_direct",
-                ]
-                order_str = _get_setting(
-                    "payment.order",
-                    "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
-                )
-                order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
-                for ch in allowed_channels:
+                order_str = _get_setting("payment.order", payment_default_order)
+                order_list = [ch for ch in order_str.split(",") if ch in payment_channels]
+                for ch in payment_channels:
                     if ch not in order_list:
                         order_list.append(ch)
                 
@@ -889,20 +868,9 @@ WHERE t.product_id=? AND t.id=?
             channel = parts[2] if len(parts) > 2 else ""
             if channel:
                 # 获取当前排序
-                allowed_channels = [
-                    "alipay",
-                    "kavip_alipay",
-                    "wxpay",
-                    "usdt_lemon",
-                    "usdt_token188",
-                    "usdt_trc20_direct",
-                ]
-                order_str = _get_setting(
-                    "payment.order",
-                    "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
-                )
-                order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
-                for ch in allowed_channels:
+                order_str = _get_setting("payment.order", payment_default_order)
+                order_list = [ch for ch in order_str.split(",") if ch in payment_channels]
+                for ch in payment_channels:
                     if ch not in order_list:
                         order_list.append(ch)
                 
@@ -1336,22 +1304,15 @@ WHERE t.product_id=? AND t.id=?
         # 公告设置：查看/编辑
         if action == "announcement":
             # 获取各支付方式的公告开关状态
-            usdt_enabled = _get_setting("announcement.usdt.enabled", "true") == "true"
-            usdt_token188_enabled = _get_setting("announcement.usdt_token188.enabled", "true") == "true"
-            alipay_enabled = _get_setting("announcement.alipay.enabled", "true") == "true"
-            wxpay_enabled = _get_setting("announcement.wxpay.enabled", "true") == "true"
-            
-            status_text = (
-                f"📊 各支付方式公告状态：\n"
-                f"• USDT(柠檬): {'✅ 已启用' if usdt_enabled else '❌ 已关闭'}\n"
-                f"• USDT(TOKEN188): {'✅ 已启用' if usdt_token188_enabled else '❌ 已关闭'}\n"
-                f"• 支付宝: {'✅ 已启用' if alipay_enabled else '❌ 已关闭'}\n"
-                f"• 微信支付: {'✅ 已启用' if wxpay_enabled else '❌ 已关闭'}\n\n"
-            )
+            status_lines = []
+            for channel, label, _default_key in announcement_channels:
+                enabled = _get_setting(f"announcement.{channel}.enabled", "true") == "true"
+                status_lines.append(f"• {label}: {'✅ 已启用' if enabled else '❌ 已关闭'}")
+            status_text = "📊 各支付方式公告状态：\n" + "\n".join(status_lines) + "\n\n"
             
             kb = make_markup([
-                [InlineKeyboardButton("✏️ USDT公告", callback_data="adm:announcement_edit:usdt")],
-                [InlineKeyboardButton("✏️ 支付宝/微信公告", callback_data="adm:announcement_edit:alipay_wxpay")],
+                [InlineKeyboardButton("✏️ 支付宝公告", callback_data="adm:announcement_edit:kavip_alipay")],
+                [InlineKeyboardButton("✏️ USDT(TRC20直付)公告", callback_data="adm:announcement_edit:usdt_trc20_direct")],
                 [InlineKeyboardButton("⚙️ 公告开关设置", callback_data="adm:announcement_switches")],
                 row_home_admin(),
             ])
@@ -1359,7 +1320,7 @@ WHERE t.product_id=? AND t.id=?
                 "📢 支付公告设置\n\n"
                 f"{status_text}"
                 "💡 提示：\n"
-                "• USDT和支付宝/微信使用不同的公告内容\n"
+                "• 支付宝和USDT(TRC20直付)使用不同的公告内容\n"
                 "• 用户选择支付方式后会直接进入付款台\n"
                 "• 公告内容会合并展示在付款台说明中"
             )
@@ -1372,17 +1333,19 @@ WHERE t.product_id=? AND t.id=?
                 await _send_text(update.effective_chat.id, "参数错误")
                 return
             
-            announcement_type = parts[2]  # usdt 或 alipay_wxpay
+            announcement_type = parts[2]
             
             # 获取当前公告内容
             current_text = (_get_setting(f"announcement.{announcement_type}.text", "")).strip()
-            
-            if announcement_type == "usdt":
-                title = "USDT支付公告"
-                default_text = t("announcement.usdt_default", "zh")
-            else:
-                title = "支付宝/微信支付公告"
-                default_text = t("announcement.rmb_default", "zh")
+            channel_meta = {
+                channel: (label, default_key)
+                for channel, label, default_key in announcement_channels
+            }
+            title, default_key = channel_meta.get(
+                announcement_type,
+                (announcement_type, "announcement.kavip_alipay_default"),
+            )
+            default_text = t(default_key, "zh")
             
             ctx.user_data["adm_wait"] = {"type": "announcement_text", "data": {"announcement_type": announcement_type}}
             kb = make_markup([
@@ -1449,38 +1412,25 @@ WHERE t.product_id=? AND t.id=?
 
         # 公告开关设置页面
         if action == "announcement_switches":
-            usdt_enabled = _get_setting("announcement.usdt.enabled", "true") == "true"
-            usdt_token188_enabled = _get_setting("announcement.usdt_token188.enabled", "true") == "true"
-            alipay_enabled = _get_setting("announcement.alipay.enabled", "true") == "true"
-            wxpay_enabled = _get_setting("announcement.wxpay.enabled", "true") == "true"
-            
-            kb = make_markup([
-                [InlineKeyboardButton(
-                    f"{'✅' if usdt_enabled else '❌'} USDT(柠檬)", 
-                    callback_data="adm:announcement_toggle:usdt"
-                )],
-                [InlineKeyboardButton(
-                    f"{'✅' if usdt_token188_enabled else '❌'} USDT(TOKEN188)", 
-                    callback_data="adm:announcement_toggle:usdt_token188"
-                )],
-                [InlineKeyboardButton(
-                    f"{'✅' if alipay_enabled else '❌'} 支付宝", 
-                    callback_data="adm:announcement_toggle:alipay"
-                )],
-                [InlineKeyboardButton(
-                    f"{'✅' if wxpay_enabled else '❌'} 微信支付", 
-                    callback_data="adm:announcement_toggle:wxpay"
-                )],
-                row_back("adm:announcement"),
-            ])
+            button_rows = []
+            status_lines = []
+            for channel, label, _default_key in announcement_channels:
+                enabled = _get_setting(f"announcement.{channel}.enabled", "true") == "true"
+                button_rows.append([
+                    InlineKeyboardButton(
+                        f"{'✅' if enabled else '❌'} {label}",
+                        callback_data=f"adm:announcement_toggle:{channel}",
+                    )
+                ])
+                status_lines.append(f"• {label}: {'✅ 已启用' if enabled else '❌ 已关闭'}")
+
+            kb = make_markup([*button_rows, row_back("adm:announcement")])
             
             text = (
                 "⚙️ 公告开关设置\n\n"
                 "点击按钮切换各支付方式的公告开关：\n\n"
-                f"• USDT(柠檬): {'✅ 已启用' if usdt_enabled else '❌ 已关闭'}\n"
-                f"• USDT(TOKEN188): {'✅ 已启用' if usdt_token188_enabled else '❌ 已关闭'}\n"
-                f"• 支付宝: {'✅ 已启用' if alipay_enabled else '❌ 已关闭'}\n"
-                f"• 微信支付: {'✅ 已启用' if wxpay_enabled else '❌ 已关闭'}\n\n"
+                + "\n".join(status_lines) +
+                "\n\n"
                 "💡 启用后，用户选择该支付方式时会先显示公告"
             )
             await _send_text(update.effective_chat.id, text, reply_markup=kb)

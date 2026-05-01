@@ -249,27 +249,23 @@ def build_payment_rows(
     - 每行最多 max_cols 个
 
     paycfg 示例：{
-      "alipay": {"name": "支付宝", "enabled": true, "priority": 10},
-      "wxpay": {"name": "微信", "enabled": false, "priority": 20},
+      "kavip_alipay": {"name": "支付宝", "enabled": true, "priority": 10},
+      "usdt_trc20_direct": {"name": "USDT(TRC20直付)", "enabled": true, "priority": 20},
     }
     """
     # 如果有get_setting_func，使用管理员设置的排序
     if get_setting_func:
-        order_str = get_setting_func(
-            "payment.order",
-            "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
-        )
-        payment_order = [ch for ch in order_str.split(",") if ch]
+        allowed_channels = {"kavip_alipay", "usdt_trc20_direct"}
+        order_str = get_setting_func("payment.order", "kavip_alipay,usdt_trc20_direct")
+        payment_order = [ch for ch in order_str.split(",") if ch in allowed_channels]
         for ch in paycfg:
-            if ch == "usdt":
+            if ch not in allowed_channels:
                 continue
             if ch not in payment_order:
                 payment_order.append(ch)
         
         items: List[Tuple[int, str, str]] = []
         for i, ch in enumerate(payment_order):
-            if ch == "usdt":
-                continue
             if ch not in paycfg:
                 continue
             cfg = paycfg[ch]
@@ -287,9 +283,10 @@ def build_payment_rows(
             items.append((i, ch, label))  # 使用顺序索引而不是priority
     else:
         # 回退到原来的priority排序
+        allowed_channels = {"kavip_alipay", "usdt_trc20_direct"}
         items: List[Tuple[int, str, str]] = []
         for ch, cfg in paycfg.items():
-            if ch == "usdt":
+            if ch not in allowed_channels:
                 continue
             # 检查配置文件中的enabled
             if not cfg.get(enabled_key, True):
@@ -328,20 +325,16 @@ def get_first_enabled_payment(
     """
     # 如果有get_setting_func，使用管理员设置的排序
     if get_setting_func:
-        order_str = get_setting_func(
-            "payment.order",
-            "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
-        )
-        payment_order = [ch for ch in order_str.split(",") if ch]
+        allowed_channels = {"kavip_alipay", "usdt_trc20_direct"}
+        order_str = get_setting_func("payment.order", "kavip_alipay,usdt_trc20_direct")
+        payment_order = [ch for ch in order_str.split(",") if ch in allowed_channels]
         for ch in paycfg:
-            if ch == "usdt":
+            if ch not in allowed_channels:
                 continue
             if ch not in payment_order:
                 payment_order.append(ch)
         
         for ch in payment_order:
-            if ch == "usdt":
-                continue
             if ch not in paycfg:
                 continue
             cfg = paycfg[ch]
@@ -358,9 +351,10 @@ def get_first_enabled_payment(
             return ch
     else:
         # 回退到原来的priority排序
+        allowed_channels = {"kavip_alipay", "usdt_trc20_direct"}
         items = []
         for ch, cfg in paycfg.items():
-            if ch == "usdt":
+            if ch not in allowed_channels:
                 continue
             # 检查配置文件中的enabled
             if not cfg.get(enabled_key, True):

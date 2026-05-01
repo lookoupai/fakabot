@@ -4,26 +4,10 @@
   "DOMAIN": "https://your-public-domain.example",
   "ORDER_TIMEOUT_SECONDS": 3600,
   "PAYMENTS": {
-    "alipay": {
-      "name": "支付宝",
-      "merchant_id": "YOUR_MERCHANT_ID",
-      "gateway": "https://your-gateway.example/submit.php",
-      "key": "YOUR_API_KEY",
-      "type": "alipay",
-      "route": "/pay/yipay"
-    },
-    "wxpay": {
-      "name": "微信",
-      "merchant_id": "YOUR_MERCHANT_ID",
-      "gateway": "https://your-gateway.example/submit.php",
-      "key": "YOUR_API_KEY",
-      "type": "wxpay",
-      "route": "/pay/yipay"
-    },
     "kavip_alipay": {
-      "name": "KAVIP支付宝",
+      "name": "支付宝",
       "enabled": false,
-      "priority": 30,
+      "priority": 10,
       "merchant_id": "YOUR_KAVIP_MERCHANT_ID",
       "gateway": "https://kavip.biz/submit.php",
       "api_gateway": "https://kavip.biz/mapi.php",
@@ -34,8 +18,8 @@
     "usdt_trc20_direct": {
       "name": "USDT(TRC20直付)",
       "enabled": false,
-      "priority": 40,
-      "tron_api_key": "a2b8a83f-61d2-4dd6-afe1-479f323459f9",
+      "priority": 20,
+      "tron_api_key": "YOUR_TRONGRID_API_KEY",
       "timeout_seconds": 3600,
       "scan_interval_seconds": 15,
       "confirmations": 1,
