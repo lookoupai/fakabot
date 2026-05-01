@@ -30,6 +30,17 @@
       "key": "YOUR_KAVIP_API_KEY",
       "type": "alipay",
       "route": "/pay/kavip"
+    },
+    "usdt_trc20_direct": {
+      "name": "USDT(TRC20直付)",
+      "enabled": false,
+      "priority": 40,
+      "tron_api_key": "a2b8a83f-61d2-4dd6-afe1-479f323459f9",
+      "timeout_seconds": 3600,
+      "scan_interval_seconds": 15,
+      "confirmations": 1,
+      "max_blocks_per_scan": 20,
+      "start_block": ""
     }
   },
   "START": {

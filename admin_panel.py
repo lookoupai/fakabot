@@ -91,6 +91,10 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
         except Exception:
             return str(value)
 
+    def _get_usdt_direct_address() -> str:
+        """USDT直付收款地址只允许从后台设置读取。"""
+        return (_get_setting("payment.usdt_trc20_direct.monitor_address", "") or "").strip()
+
     def _ensure_i18n_tables():
         try:
             cur.execute(
@@ -649,6 +653,7 @@ WHERE t.product_id=? AND t.id=?
         # 支付设置主页
         if action == "pay":
             cur_cols = (_get_setting("ui.payment_cols", str(START_CFG.get("payment_cols") or "3")) or "3").strip()
+            usdt_direct_address = _get_usdt_direct_address()
             
             # 获取支付方式开关状态
             def get_payment_status(channel):
@@ -659,8 +664,18 @@ WHERE t.product_id=? AND t.id=?
             
             # 获取支付方式排序
             def get_payment_order():
-                allowed_channels = ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]
-                order_str = _get_setting("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+                allowed_channels = [
+                    "alipay",
+                    "kavip_alipay",
+                    "wxpay",
+                    "usdt_lemon",
+                    "usdt_token188",
+                    "usdt_trc20_direct",
+                ]
+                order_str = _get_setting(
+                    "payment.order",
+                    "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
+                )
                 order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
                 for ch in allowed_channels:
                     if ch not in order_list:
@@ -673,7 +688,8 @@ WHERE t.product_id=? AND t.id=?
                     "kavip_alipay": "KAVIP支付宝",
                     "wxpay": "微信", 
                     "usdt_lemon": "USDT (柠檬)",
-                    "usdt_token188": "USDT(TRC20)"
+                    "usdt_token188": "USDT(TRC20)",
+                    "usdt_trc20_direct": "USDT(TRC20直付)"
                 }
                 return names.get(channel, channel)
             
@@ -681,7 +697,14 @@ WHERE t.product_id=? AND t.id=?
             payment_order = get_payment_order()
             
             for i, channel in enumerate(payment_order):
-                if channel not in ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]:
+                if channel not in [
+                    "alipay",
+                    "kavip_alipay",
+                    "wxpay",
+                    "usdt_lemon",
+                    "usdt_token188",
+                    "usdt_trc20_direct",
+                ]:
                     continue
                     
                 name = get_payment_name(channel)
@@ -712,17 +735,49 @@ WHERE t.product_id=? AND t.id=?
             
             kb = make_markup([
                 [InlineKeyboardButton(f"🧩 每行支付按钮：{cur_cols}", callback_data="adm:pay_cols")],
+                [InlineKeyboardButton("💳 USDT直付收款地址", callback_data="adm:pay_usdt_address")],
                 *payment_buttons,
                 row_home_admin(),
             ])
             text = (
                 "💳 支付设置\n"
                 f"每行按钮数：{cur_cols} (1-4)\n"
+                f"USDT直付收款地址：{usdt_direct_address or '未设置'}\n"
                 "\n📋 支付方式管理：\n"
                 "• 点击支付方式名称：开启/关闭\n"
                 "• 点击 ⬆️ ⬇️：调整显示顺序"
             )
             await _send_text(update.effective_chat.id, text, reply_markup=kb)
+            return
+
+        # 支付设置：配置 USDT(TRC20直付) 收款地址
+        if action == "pay_usdt_address":
+            ctx.user_data["adm_wait"] = {"type": "pay_usdt_address", "data": {}}
+            current_address = _get_usdt_direct_address()
+            kb = make_markup([
+                [InlineKeyboardButton("🧹 清空后台地址", callback_data="adm:pay_usdt_address_clear")],
+                row_back("adm:pay"),
+            ])
+            text = (
+                "请输入 USDT(TRC20直付) 收款地址：\n"
+                "要求：TRON/TRC20 地址，通常以 T 开头。\n\n"
+                f"当前地址：{current_address or '未设置'}\n"
+                "发送新地址后会保存到后台设置；未配置地址时无法开启该支付方式。"
+            )
+            await _send_text(update.effective_chat.id, text, reply_markup=kb)
+            return
+
+        # 支付设置：清空后台 USDT 直付地址
+        if action == "pay_usdt_address_clear":
+            _set_setting("payment.usdt_trc20_direct.monitor_address", "")
+            _set_setting("payment.usdt_trc20_direct.enabled", "false")
+            await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已清空后台收款地址，并关闭USDT直付", ttl=2)
+            await adm_router(type("obj", (), {
+                "callback_query": type("q", (), {"data": "adm:pay"}),
+                "effective_user": update.effective_user,
+                "effective_chat": update.effective_chat,
+                "get_bot": update.get_bot,
+            })(), ctx)
             return
 
         # 支付设置：选择每行按钮数
@@ -740,6 +795,20 @@ WHERE t.product_id=? AND t.id=?
             if channel:
                 # 获取当前状态
                 current_status = _get_setting(f"payment.{channel}.enabled", "true") == "true"
+                if channel == "usdt_trc20_direct" and not current_status and not _get_usdt_direct_address():
+                    await send_ephemeral(
+                        update.get_bot(),
+                        update.effective_chat.id,
+                        "❗ 请先配置USDT直付收款地址，再开启该支付方式",
+                        ttl=3
+                    )
+                    await adm_router(type("obj", (), {
+                        "callback_query": type("q", (), {"data": "adm:pay_usdt_address"}),
+                        "effective_user": update.effective_user,
+                        "effective_chat": update.effective_chat,
+                        "get_bot": update.get_bot
+                    })(), ctx)
+                    return
                 # 切换状态
                 new_status = "false" if current_status else "true"
                 _set_setting(f"payment.{channel}.enabled", new_status)
@@ -776,8 +845,18 @@ WHERE t.product_id=? AND t.id=?
             channel = parts[2] if len(parts) > 2 else ""
             if channel:
                 # 获取当前排序
-                allowed_channels = ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]
-                order_str = _get_setting("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+                allowed_channels = [
+                    "alipay",
+                    "kavip_alipay",
+                    "wxpay",
+                    "usdt_lemon",
+                    "usdt_token188",
+                    "usdt_trc20_direct",
+                ]
+                order_str = _get_setting(
+                    "payment.order",
+                    "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
+                )
                 order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
                 for ch in allowed_channels:
                     if ch not in order_list:
@@ -814,8 +893,18 @@ WHERE t.product_id=? AND t.id=?
             channel = parts[2] if len(parts) > 2 else ""
             if channel:
                 # 获取当前排序
-                allowed_channels = ["alipay", "kavip_alipay", "wxpay", "usdt_lemon", "usdt_token188"]
-                order_str = _get_setting("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+                allowed_channels = [
+                    "alipay",
+                    "kavip_alipay",
+                    "wxpay",
+                    "usdt_lemon",
+                    "usdt_token188",
+                    "usdt_trc20_direct",
+                ]
+                order_str = _get_setting(
+                    "payment.order",
+                    "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
+                )
                 order_list = [ch for ch in order_str.split(",") if ch in allowed_channels]
                 for ch in allowed_channels:
                     if ch not in order_list:
@@ -2091,6 +2180,29 @@ WHERE t.product_id=? AND t.id=?
             ctx.user_data.pop("adm_wait", None)
             # 返回客服设置主页
             await adm_router(type("obj", (), {"callback_query": type("q", (), {"data": "adm:support"}), "effective_user": update.effective_user, "effective_chat": update.effective_chat, "get_bot": update.get_bot})(), ctx)
+            return
+
+        # 保存 USDT(TRC20直付) 收款地址（支付设置）
+        if kind == "pay_usdt_address":
+            val = text.strip()
+            if not (val.startswith("T") and len(val) == 34):
+                await update.message.reply_text(
+                    "格式不正确，请输入 TRON/TRC20 地址，通常以 T 开头且长度为 34 位：",
+                    reply_markup=make_markup([row_back("adm:pay")]),
+                )
+                return
+            try:
+                _set_setting("payment.usdt_trc20_direct.monitor_address", val)
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存USDT直付收款地址", ttl=2)
+            except Exception:
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "❗ 保存失败", ttl=2)
+            ctx.user_data.pop("adm_wait", None)
+            await adm_router(type("obj", (), {
+                "callback_query": type("q", (), {"data": "adm:pay"}),
+                "effective_user": update.effective_user,
+                "effective_chat": update.effective_chat,
+                "get_bot": update.get_bot,
+            })(), ctx)
             return
 
         # 保存公告内容（公告设置）

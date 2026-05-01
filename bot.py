@@ -18,6 +18,9 @@ import hashlib
 from admin_panel import register_admin_handlers
 from user_flow import register_user_handlers
 from utils import ensure_settings_table, get_setting, set_setting
+from usdt_trc20 import ensure_usdt_tables
+from usdt_trc20 import mark_expired_direct_payments
+from usdt_trc20 import scan_and_match_payments
 from i18n import DEFAULT_LANGUAGE, normalize_language, t
 
 # Redis缓存和频率限制
@@ -525,6 +528,11 @@ try:
 except Exception:
     pass
 
+try:
+    ensure_usdt_tables(cur, conn)
+except Exception as e:
+    print(f"⚠️ 初始化USDT直付表失败: {e}")
+
 def _mark_paid_and_deliver(out_trade_no: str, conn_override=None, cur_override=None):
     _conn = conn_override or conn
     _cur = cur_override or cur
@@ -900,6 +908,10 @@ async def job_cancel_expired(ctx: ContextTypes.DEFAULT_TYPE):
     def get_payment_timeout_seconds(channel: str) -> int:
         """根据支付方式返回不同的订单超时时间"""
         timeout_config = {
+            "usdt_trc20_direct": int(
+                PAYCFG.get("usdt_trc20_direct", {}).get("timeout_seconds", 60 * 60)
+                or 60 * 60
+            ),
             "usdt_token188": 60 * 60,      # TOKEN188支付：60分钟
             "usdt_lemon": 120 * 60,        # 柠檬USDT：120分钟
             "alipay": 10 * 60,             # 支付宝：10分钟
@@ -917,6 +929,68 @@ async def job_cancel_expired(ctx: ContextTypes.DEFAULT_TYPE):
         if now - create_time > timeout_seconds:
             cur.execute("UPDATE orders SET status='cancelled' WHERE id=?", (oid,))
             conn.commit()
+    try:
+        mark_expired_direct_payments(cur, conn)
+    except Exception as e:
+        print(f"⚠️ USDT直付过期同步失败: {e}")
+
+
+def _scan_usdt_trc20_once() -> int:
+    """Run one blocking TRC20-USDT scan with an isolated SQLite connection."""
+    conn_scan = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cur_scan = conn_scan.cursor()
+    try:
+        cur_scan.execute("PRAGMA busy_timeout=5000;")
+        ensure_settings_table(cur_scan, conn_scan)
+        ensure_usdt_tables(cur_scan, conn_scan)
+
+        def _get_scan_setting(key: str, default: str = "") -> str:
+            return get_setting(cur_scan, key, default)
+
+        def _set_scan_setting(key: str, value: str) -> None:
+            set_setting(cur_scan, conn_scan, key, value)
+
+        def _mark_paid(out_trade_no: str) -> None:
+            _mark_paid_and_deliver(
+                out_trade_no,
+                conn_override=conn_scan,
+                cur_override=cur_scan,
+            )
+
+        effective_paycfg = dict(PAYCFG or {})
+        direct_cfg = dict(effective_paycfg.get("usdt_trc20_direct", {}) or {})
+        admin_address = (_get_scan_setting("payment.usdt_trc20_direct.monitor_address", "") or "").strip()
+        # 收款地址只允许来自后台设置，config.json 仅保留其它扫链参数。
+        direct_cfg["monitor_address"] = admin_address
+        effective_paycfg["usdt_trc20_direct"] = direct_cfg
+
+        return scan_and_match_payments(
+            cur_scan,
+            conn_scan,
+            effective_paycfg,
+            _mark_paid,
+            _get_scan_setting,
+            _set_scan_setting,
+        )
+    finally:
+        try:
+            cur_scan.close()
+        except Exception:
+            pass
+        try:
+            conn_scan.close()
+        except Exception:
+            pass
+
+
+async def job_scan_usdt_trc20(ctx: ContextTypes.DEFAULT_TYPE):
+    """Background job that scans TRON blocks for direct USDT payments."""
+    try:
+        matched_count = await asyncio.to_thread(_scan_usdt_trc20_once)
+        if matched_count:
+            print(f"✅ USDT直付扫链匹配订单数: {matched_count}")
+    except Exception as e:
+        print(f"⚠️ USDT直付扫链失败: {e}")
 
 
 async def cmd_reloadcfg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -949,6 +1023,13 @@ application.add_handler(CommandHandler("reloadcfg", cmd_reloadcfg))
 
 async def on_start(app: Application):
     app.job_queue.run_repeating(job_cancel_expired, interval=60, first=10)
+    usdt_direct_cfg = PAYCFG.get("usdt_trc20_direct", {})
+    scan_interval = int(usdt_direct_cfg.get("scan_interval_seconds", 15) or 15)
+    app.job_queue.run_repeating(
+        job_scan_usdt_trc20,
+        interval=max(5, scan_interval),
+        first=8,
+    )
     # 设置全局命令菜单，替换旧的 /open_shop 为 /support
     try:
         await app.bot.set_my_commands([

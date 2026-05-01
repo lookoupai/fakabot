@@ -255,7 +255,10 @@ def build_payment_rows(
     """
     # 如果有get_setting_func，使用管理员设置的排序
     if get_setting_func:
-        order_str = get_setting_func("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+        order_str = get_setting_func(
+            "payment.order",
+            "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
+        )
         payment_order = [ch for ch in order_str.split(",") if ch]
         for ch in paycfg:
             if ch == "usdt":
@@ -325,7 +328,10 @@ def get_first_enabled_payment(
     """
     # 如果有get_setting_func，使用管理员设置的排序
     if get_setting_func:
-        order_str = get_setting_func("payment.order", "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188")
+        order_str = get_setting_func(
+            "payment.order",
+            "alipay,kavip_alipay,wxpay,usdt_lemon,usdt_token188,usdt_trc20_direct",
+        )
         payment_order = [ch for ch in order_str.split(",") if ch]
         for ch in paycfg:
             if ch == "usdt":

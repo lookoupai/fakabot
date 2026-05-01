@@ -14,6 +14,7 @@ from utils import render_home
 from utils import send_ephemeral
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, ChatMemberHandler
 from payments import create_payment as pay_create
+from usdt_trc20 import create_direct_payment, get_direct_payment
 from utils import notify_admin
 from utils import build_payment_rows, get_first_enabled_payment, row_back, make_markup, rows_pay_console, build_confirm_rows
 from utils import STATUS_ZH
@@ -269,6 +270,10 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             int: 超时时间（秒）
         """
         timeout_config = {
+            "usdt_trc20_direct": int(
+                PAYCFG.get("usdt_trc20_direct", {}).get("timeout_seconds", 60 * 60)
+                or 60 * 60
+            ),
             "usdt_token188": 60 * 60,      # TOKEN188支付：60分钟
             "usdt_lemon": 120 * 60,        # 柠檬USDT：120分钟
             "alipay": 10 * 60,             # 支付宝：10分钟
@@ -276,6 +281,13 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
             "wxpay": 10 * 60,              # 微信支付：10分钟
         }
         return timeout_config.get(channel, ORDER_TIMEOUT_SECONDS)  # 默认使用配置文件中的值
+
+    def get_usdt_direct_config() -> dict:
+        """读取USDT直付配置，收款地址只允许来自后台设置。"""
+        config = dict(PAYCFG.get("usdt_trc20_direct", {}) or {})
+        admin_address = (_get_setting("payment.usdt_trc20_direct.monitor_address", "") or "").strip()
+        config["monitor_address"] = admin_address
+        return config
 
     # ---------------- 用户端功能：命令与回调 ----------------
 
@@ -687,7 +699,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         if not announcement_enabled:
             return ""
 
-        is_usdt = channel in ["usdt", "usdt_token188", "usdt_lemon"]
+        is_usdt = channel in ["usdt", "usdt_trc20_direct", "usdt_token188", "usdt_lemon"]
         if is_usdt:
             custom_announcement = (_get_setting("announcement.usdt.text", "")).strip()
             default_announcement = t("announcement.usdt_default", lang)
@@ -745,6 +757,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
         except Exception:
             pass
         
+        direct_payment_info = None
         # 如果使用预加载订单，直接跳到显示部分
         if use_preloaded:
             out_trade_no = use_preloaded['out_trade_no']
@@ -788,17 +801,35 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             else:
                 # 极端情况下仍碰撞，退回到时间戳方案
                 out_trade_no = f"{_rand36(6)}-{str(int(time.time()))[-5:]}"
-            ok, pay_url, err = create_payment(channel, subject, price, out_trade_no)
-            if not ok:
-                try:
+            pay_url = None
+            if channel == "usdt_trc20_direct":
+                direct_config = get_usdt_direct_config()
+                if not direct_config.get("enabled", False):
                     await _delete_last_and_send_text(
                         update.effective_chat.id,
-                        t("payment.create_failed", lang, error=err),
+                        t("payment.create_failed", lang, error="USDT直付通道未启用"),
                         reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
                     )
-                except Exception:
-                    pass
-                return
+                    return
+                if not direct_config.get("monitor_address"):
+                    await _delete_last_and_send_text(
+                        update.effective_chat.id,
+                        t("payment.create_failed", lang, error="USDT直付收款地址未配置，请联系管理员"),
+                        reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
+                    )
+                    return
+            else:
+                ok, pay_url, err = create_payment(channel, subject, price, out_trade_no)
+                if not ok:
+                    try:
+                        await _delete_last_and_send_text(
+                            update.effective_chat.id,
+                            t("payment.create_failed", lang, error=err),
+                            reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
+                        )
+                    except Exception:
+                        pass
+                    return
             
             # ✅ 修复：检查订单是否已存在（避免重复插入）
             try:
@@ -809,20 +840,53 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                         (update.effective_user.id, pid, tier_id, price, channel, out_trade_no, int(time.time())),
                     )
                     conn.commit()
-                    
+
                     # 取消其他待支付订单
                     try:
                         cur.execute(
                             "UPDATE orders SET status='cancelled' WHERE user_id=? AND status='pending' AND out_trade_no<>?",
                             (update.effective_user.id, out_trade_no),
                         )
+                        cur.execute(
+                            """
+UPDATE usdt_direct_payments
+SET status='cancelled'
+WHERE status='pending'
+  AND out_trade_no IN (
+      SELECT out_trade_no FROM orders
+      WHERE user_id=? AND status='cancelled'
+  )
+""",
+                            (update.effective_user.id,),
+                        )
                         conn.commit()
                     except Exception:
                         pass
+
+                    if channel == "usdt_trc20_direct":
+                        direct_payment_info = create_direct_payment(
+                            cur,
+                            conn,
+                            out_trade_no,
+                            price,
+                            get_usdt_direct_config(),
+                            get_payment_timeout_seconds(channel),
+                        )
                 else:
                     print(f"⚠️ 订单 {out_trade_no} 已存在，跳过插入")
+                    if channel == "usdt_trc20_direct":
+                        direct_payment_info = get_direct_payment(cur, out_trade_no)
             except Exception as e:
                 print(f"❌ 订单插入检查失败: {e}")
+                try:
+                    await _delete_last_and_send_text(
+                        update.effective_chat.id,
+                        t("payment.create_failed", lang, error=str(e)),
+                        reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
+                    )
+                except Exception:
+                    pass
+                return
         try:
             row_desc = cur.execute("SELECT full_description FROM products WHERE id=?", (pid,)).fetchone()
             detail = _product_text(pid, lang, "full_description", (row_desc[0]) if (row_desc and row_desc[0]) else "")
@@ -840,6 +904,53 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             return f"{notice}\n\n{text}" if notice else text
 
         kb = _build_pay_kb(pid, out_trade_no)
+
+        is_usdt_direct = (
+            channel == "usdt_trc20_direct"
+            and get_usdt_direct_config().get("enabled", False)
+        )
+
+        if is_usdt_direct:
+            if not direct_payment_info:
+                direct_payment_info = get_direct_payment(cur, out_trade_no)
+            if not direct_payment_info:
+                await _delete_last_and_send_text(
+                    update.effective_chat.id,
+                    t("payment.create_failed", lang, error="USDT直付订单记录缺失"),
+                    reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
+                )
+                return
+
+            method_name = get_usdt_direct_config().get("name", "USDT(TRC20直付)")
+            usdt_address = direct_payment_info["monitor_address"]
+            pay_amount = direct_payment_info["pay_amount"]
+            expire_time = int(direct_payment_info.get("expire_time") or time.time())
+            mins = max(1, (expire_time - int(time.time())) // 60)
+            qr_img = qrcode.make(usdt_address)
+            bio = BytesIO()
+            bio.name = "usdt_trc20_address.png"
+            qr_img.save(bio, "PNG")
+            bio.seek(0)
+
+            caption = _with_payment_notice(
+                f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
+                f"{t('payment.product_name', lang, subject=subject)}\n"
+                f"{t('payment.product_detail', lang, detail=detail)}\n"
+                f"{t('payment.usdt_direct_amount', lang, amount=pay_amount)}\n"
+                f"{t('payment.method', lang, method=method_name)}\n"
+                f"{t('payment.wallet', lang, address=usdt_address)}\n"
+                f"{t('payment.timeout', lang, minutes=mins)}\n\n"
+                f"{t('payment.usdt_direct_network_hint', lang)}\n"
+                f"{t('payment.usdt_direct_qr_hint', lang)}"
+            )
+            await _delete_last_and_send_photo(
+                update.effective_chat.id,
+                InputFile(bio),
+                caption=caption,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+            return
         
         # 检查是否为TOKEN188 USDT支付
         is_token188_usdt = (channel == "usdt_token188" and PAYCFG.get("usdt_token188", {}).get("enabled", False))
