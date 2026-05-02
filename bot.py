@@ -20,6 +20,7 @@ from user_flow import register_user_handlers
 from utils import ensure_settings_table, get_setting, set_setting
 from usdt_trc20 import ensure_usdt_tables
 from usdt_trc20 import mark_expired_direct_payments
+from usdt_trc20 import match_payments_from_shared_store
 from usdt_trc20 import scan_and_match_payments
 from i18n import DEFAULT_LANGUAGE, normalize_language, t
 
@@ -208,6 +209,7 @@ WEBHOOK_PATH = CFG.get("WEBHOOK_PATH", "/tg/webhook")
 WEBHOOK_SECRET = CFG.get("WEBHOOK_SECRET") or hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:32]
 ORDER_TIMEOUT_SECONDS = int(CFG.get("ORDER_TIMEOUT_SECONDS", 900))
 PAYCFG = CFG["PAYMENTS"]
+USDT_SCAN_CFG = CFG.get("USDT_SCAN", {})
 PRODUCTS_CFG = CFG.get("PRODUCTS", [])
 START_CFG = CFG.get("START", {})  # {"cover_url": str, "intro": str, "title": str}
 SHOW_QR = bool(CFG.get("SHOW_QR", True))
@@ -936,7 +938,7 @@ async def job_cancel_expired(ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def _scan_usdt_trc20_once() -> int:
-    """Run one blocking TRC20-USDT scan with an isolated SQLite connection."""
+    """Run one blocking TRC20-USDT scan or match job with an isolated SQLite connection."""
     conn_scan = sqlite3.connect(DB_PATH, check_same_thread=False)
     cur_scan = conn_scan.cursor()
     try:
@@ -955,6 +957,17 @@ def _scan_usdt_trc20_once() -> int:
                 out_trade_no,
                 conn_override=conn_scan,
                 cur_override=cur_scan,
+            )
+
+        scan_mode = str(USDT_SCAN_CFG.get("mode") or "standalone").strip().lower()
+        if scan_mode == "shared_scanner":
+            return 0
+        if scan_mode == "match_only":
+            return match_payments_from_shared_store(
+                cur_scan,
+                conn_scan,
+                str(USDT_SCAN_CFG.get("shared_store") or "/shared/usdt_chain.db"),
+                _mark_paid,
             )
 
         effective_paycfg = dict(PAYCFG or {})
@@ -984,7 +997,7 @@ def _scan_usdt_trc20_once() -> int:
 
 
 async def job_scan_usdt_trc20(ctx: ContextTypes.DEFAULT_TYPE):
-    """Background job that scans TRON blocks for direct USDT payments."""
+    """Background job that scans or matches direct USDT payments."""
     try:
         matched_count = await asyncio.to_thread(_scan_usdt_trc20_once)
         if matched_count:
@@ -1000,13 +1013,14 @@ async def cmd_reloadcfg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with open(CFG_PATH, "r", encoding="utf-8") as f:
             _raw = f.read()
             cfg_new = json.loads(_strip_json_comments(_raw))
-        global CFG, BOT_TOKEN, ADMIN_ID, DOMAIN, ORDER_TIMEOUT_SECONDS, PAYCFG, PRODUCTS_CFG, START_CFG, SHOW_QR, STRICT_CALLBACK_SIGN_VERIFY, ENABLE_PAYMENT_SCREENSHOT, TOKEN188_CFG
+        global CFG, BOT_TOKEN, ADMIN_ID, DOMAIN, ORDER_TIMEOUT_SECONDS, PAYCFG, USDT_SCAN_CFG, PRODUCTS_CFG, START_CFG, SHOW_QR, STRICT_CALLBACK_SIGN_VERIFY, ENABLE_PAYMENT_SCREENSHOT, TOKEN188_CFG
         CFG = cfg_new
         BOT_TOKEN = CFG["BOT_TOKEN"]
         ADMIN_ID = int(CFG["ADMIN_ID"])
         DOMAIN = CFG.get("DOMAIN", "http://127.0.0.1")
         ORDER_TIMEOUT_SECONDS = int(CFG.get("ORDER_TIMEOUT_SECONDS", 900))
         PAYCFG = CFG["PAYMENTS"]
+        USDT_SCAN_CFG = CFG.get("USDT_SCAN", {})
         PRODUCTS_CFG = CFG.get("PRODUCTS", [])  
         START_CFG = CFG.get("START", START_CFG or {})  
         SHOW_QR = bool(CFG.get("SHOW_QR", True))
@@ -1023,13 +1037,19 @@ application.add_handler(CommandHandler("reloadcfg", cmd_reloadcfg))
 
 async def on_start(app: Application):
     app.job_queue.run_repeating(job_cancel_expired, interval=60, first=10)
-    usdt_direct_cfg = PAYCFG.get("usdt_trc20_direct", {})
-    scan_interval = int(usdt_direct_cfg.get("scan_interval_seconds", 15) or 15)
-    app.job_queue.run_repeating(
-        job_scan_usdt_trc20,
-        interval=max(5, scan_interval),
-        first=8,
-    )
+    scan_mode = str(USDT_SCAN_CFG.get("mode") or "standalone").strip().lower()
+    if scan_mode != "shared_scanner":
+        usdt_direct_cfg = PAYCFG.get("usdt_trc20_direct", {})
+        scan_interval = int(
+            USDT_SCAN_CFG.get("scan_interval_seconds")
+            or usdt_direct_cfg.get("scan_interval_seconds", 15)
+            or 15
+        )
+        app.job_queue.run_repeating(
+            job_scan_usdt_trc20,
+            interval=max(5, scan_interval),
+            first=8,
+        )
     # 设置全局命令菜单，替换旧的 /open_shop 为 /support
     try:
         await app.bot.set_my_commands([

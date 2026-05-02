@@ -1,36 +1,36 @@
 {
   "BOT_TOKEN": "YOUR_TELEGRAM_BOT_TOKEN",
-  "ADMIN_ID": 123456789,
-  "DOMAIN": "https://your-public-domain.example",
+  "ADMIN_ID": 8755978774,
+  "DOMAIN": "https://pay.unishopasa.cn/bot11",
   "ORDER_TIMEOUT_SECONDS": 3600,
   "PAYMENTS": {
     "kavip_alipay": {
       "name": "支付宝",
-      "enabled": false,
+      "enabled": true,
       "priority": 10,
-      "merchant_id": "YOUR_KAVIP_MERCHANT_ID",
+      "merchant_id": "1023",
       "gateway": "https://kavip.biz/submit.php",
       "api_gateway": "https://kavip.biz/mapi.php",
-      "key": "YOUR_KAVIP_API_KEY",
+      "key": "76F67wdDD7p56l7g1F66wFTRLv7pd5rv",
       "type": "alipay",
       "route": "/pay/kavip"
     },
     "usdt_trc20_direct": {
       "name": "USDT(TRC20直付)",
-      "enabled": false,
+      "enabled": true,
       "priority": 20,
-      "tron_api_key": "YOUR_TRONGRID_API_KEY",
-      "timeout_seconds": 3600,
-      "scan_interval_seconds": 15,
-      "confirmations": 1,
-      "max_blocks_per_scan": 20,
-      "start_block": ""
+      "timeout_seconds": 3600
     }
+  },
+  "USDT_SCAN": {
+    "mode": "match_only",
+    "shared_store": "/shared/usdt_chain.db",
+    "scan_interval_seconds": 10
   },
   "START": {
     "cover_url": "https://img.example/start-cover.jpg",
     "title": "欢迎选购",
-    "intro": "这里是商店简介或活动文案，可在 config.json 的 START 中自定义。",
+    "intro": "这里是 fakabot 商店简介或活动文案，可在 config.json 的 START 中自定义。",
     "title_en": "Welcome",
     "intro_en": "This is your store intro or promotion text."
   },

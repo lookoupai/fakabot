@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time
+import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
 from secrets import randbelow
@@ -16,6 +17,7 @@ TRANSFER_METHOD_ID = "a9059cbb"
 USDT_DECIMALS = Decimal("1000000")
 USDT_SCALE = 1_000_000
 DEFAULT_LAST_BLOCK_KEY = "usdt_trc20.last_scanned_block"
+DEFAULT_GLOBAL_LAST_BLOCK_KEY = "usdt_trc20.global_last_scanned_block"
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,20 @@ CREATE TABLE IF NOT EXISTS usdt_direct_payments (
 )
 """
     )
+    ensure_usdt_chain_tables(cur, conn)
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_usdt_direct_order "
+        "ON usdt_direct_payments(out_trade_no)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usdt_direct_match "
+        "ON usdt_direct_payments(status, monitor_address, pay_amount, expire_time)"
+    )
+    conn.commit()
+
+
+def ensure_usdt_chain_tables(cur, conn) -> None:
+    """Create shared chain transaction tables and settings."""
     cur.execute(
         """
 CREATE TABLE IF NOT EXISTS usdt_chain_transactions (
@@ -65,16 +81,20 @@ CREATE TABLE IF NOT EXISTS usdt_chain_transactions (
 """
     )
     cur.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_usdt_direct_order "
-        "ON usdt_direct_payments(out_trade_no)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_usdt_direct_match "
-        "ON usdt_direct_payments(status, monitor_address, pay_amount, expire_time)"
+        """
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+"""
     )
     cur.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_usdt_chain_txid "
         "ON usdt_chain_transactions(txid)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usdt_chain_match "
+        "ON usdt_chain_transactions(to_address, raw_amount, tx_time)"
     )
     conn.commit()
 
@@ -228,6 +248,128 @@ def scan_and_match_payments(
     return matched_count
 
 
+def scan_chain_to_store(
+    cur,
+    conn,
+    config: dict,
+    get_setting: Callable[[str, str], str],
+    set_setting: Callable[[str, str], None],
+) -> int:
+    """Scan TRON once and write all TRC20-USDT transfers to a shared store."""
+    if not config.get("enabled", True):
+        return 0
+
+    client = _build_tron_client(config)
+    latest_block = int(client.get_latest_block()["block_header"]["raw_data"]["number"])
+    confirmations = max(0, int(config.get("confirmations", 1) or 1))
+    target_block = latest_block - confirmations
+    if target_block <= 0:
+        return 0
+
+    last_scanned = _get_last_scanned_block(
+        get_setting,
+        {**config, "start_block_key": DEFAULT_GLOBAL_LAST_BLOCK_KEY},
+        target_block,
+    )
+    max_blocks = max(1, int(config.get("max_blocks_per_scan", 20) or 20))
+    end_block = min(target_block, last_scanned + max_blocks)
+    if end_block <= last_scanned:
+        return 0
+
+    saved_count = 0
+    for block_number in range(last_scanned + 1, end_block + 1):
+        block = client.get_block(block_number)
+        for transfer in parse_usdt_transfers(block, client):
+            saved_count += _save_transfer(cur, conn, transfer)
+        set_setting(DEFAULT_GLOBAL_LAST_BLOCK_KEY, str(block_number))
+
+    return saved_count
+
+
+def match_payments_from_shared_store(
+    cur,
+    conn,
+    shared_store_path: str,
+    mark_paid: Callable[[str], None],
+) -> int:
+    """Match local pending orders against a shared chain transaction database."""
+    if not shared_store_path:
+        return 0
+
+    shared_conn = sqlite3.connect(shared_store_path, check_same_thread=False)
+    shared_cur = shared_conn.cursor()
+    try:
+        shared_cur.execute("PRAGMA busy_timeout=5000;")
+        ensure_usdt_chain_tables(shared_cur, shared_conn)
+        rows = cur.execute(
+            """
+SELECT p.out_trade_no,
+       p.monitor_address,
+       p.pay_amount,
+       p.create_time,
+       p.expire_time
+FROM usdt_direct_payments p
+JOIN orders o ON o.out_trade_no=p.out_trade_no
+WHERE p.status='pending'
+  AND o.status='pending'
+  AND p.expire_time>=?
+ORDER BY p.create_time ASC
+""",
+            (int(time.time()),),
+        ).fetchall()
+
+        matched_count = 0
+        for out_trade_no, monitor_address, pay_amount, create_time, expire_time in rows:
+            try:
+                raw_amount = str(payment_amount_to_raw(pay_amount))
+            except Exception:
+                continue
+            tx_row = shared_cur.execute(
+                """
+SELECT txid, from_address, amount, raw_amount, tx_time
+FROM usdt_chain_transactions
+WHERE to_address=?
+  AND raw_amount=?
+  AND tx_time>=?
+  AND tx_time<=?
+ORDER BY block_number ASC, id ASC
+LIMIT 1
+""",
+                (
+                    monitor_address,
+                    raw_amount,
+                    int(create_time) * 1000,
+                    int(expire_time) * 1000,
+                ),
+            ).fetchone()
+            if not tx_row:
+                continue
+
+            txid = tx_row[0]
+            cur.execute(
+                """
+UPDATE usdt_direct_payments
+SET status='paid', matched_txid=?
+WHERE out_trade_no=? AND status='pending'
+""",
+                (txid, out_trade_no),
+            )
+            conn.commit()
+            mark_paid(out_trade_no)
+            matched_count += 1
+
+        return matched_count
+    finally:
+        try:
+            shared_cur.close()
+        except Exception:
+            pass
+        try:
+            shared_conn.close()
+        except Exception:
+            pass
+
+
 def parse_usdt_transfers(block: dict, client) -> Iterable[TronUsdtTransfer]:
     """Parse successful TRC20-USDT transfer transactions from a TRON block."""
     transactions = block.get("transactions") or []
@@ -310,7 +452,13 @@ def _build_tron_client(config: dict):
     except ImportError as exc:
         raise RuntimeError("缺少 tronpy 依赖，请先安装 requirements.txt") from exc
 
-    api_key = config.get("tron_api_key") or config.get("api_key") or None
+    api_keys = config.get("tron_api_keys")
+    api_key = None
+    if isinstance(api_keys, list) and api_keys:
+        index = int(config.get("_api_key_index", 0) or 0) % len(api_keys)
+        api_key = api_keys[index]
+    if not api_key:
+        api_key = config.get("tron_api_key") or config.get("api_key") or None
     if api_key:
         return Tron(HTTPProvider(api_key=[api_key]))
     return Tron()
@@ -318,7 +466,8 @@ def _build_tron_client(config: dict):
 
 def _get_last_scanned_block(get_setting: Callable[[str, str], str], config: dict, target_block: int) -> int:
     """Resolve scan start block from settings or config."""
-    saved = str(get_setting(DEFAULT_LAST_BLOCK_KEY, "") or "").strip()
+    setting_key = config.get("start_block_key") or DEFAULT_LAST_BLOCK_KEY
+    saved = str(get_setting(setting_key, "") or "").strip()
     if saved.isdigit():
         return int(saved)
 
@@ -337,7 +486,7 @@ def _is_success_transaction(trx: dict) -> bool:
     return ret_list[0].get("contractRet") == "SUCCESS"
 
 
-def _save_transfer(cur, conn, transfer: TronUsdtTransfer) -> None:
+def _save_transfer(cur, conn, transfer: TronUsdtTransfer) -> int:
     """Persist a chain transaction once for deduplication and audit."""
     cur.execute(
         """
@@ -358,6 +507,7 @@ INSERT OR IGNORE INTO usdt_chain_transactions (
         ),
     )
     conn.commit()
+    return 1 if cur.rowcount == 1 else 0
 
 
 def _match_transfer_to_order(cur, conn, transfer: TronUsdtTransfer) -> Optional[str]:
