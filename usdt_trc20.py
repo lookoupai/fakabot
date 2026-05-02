@@ -14,6 +14,7 @@ from typing import Callable, Iterable, Optional
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 TRANSFER_METHOD_ID = "a9059cbb"
 USDT_DECIMALS = Decimal("1000000")
+USDT_SCALE = 1_000_000
 DEFAULT_LAST_BLOCK_KEY = "usdt_trc20.last_scanned_block"
 
 
@@ -90,7 +91,20 @@ def fmt_amount(value) -> str:
 
 def fmt_chain_amount(value) -> str:
     """Format a chain amount with USDT's six decimal places."""
-    return format(Decimal(str(value)).quantize(Decimal("0.000001")), "f")
+    return format(Decimal(str(value)), "f")
+
+
+def raw_amount_to_text(raw_amount: int) -> str:
+    """Convert USDT's integer base units to a fixed six-decimal string."""
+    sign = "-" if raw_amount < 0 else ""
+    whole, fraction = divmod(abs(int(raw_amount)), USDT_SCALE)
+    return f"{sign}{whole}.{fraction:06d}"
+
+
+def payment_amount_to_raw(value) -> int:
+    """Convert an order amount string to USDT base units for exact matching."""
+    amount = Decimal(str(value))
+    return int((amount * USDT_DECIMALS).to_integral_value())
 
 
 def create_direct_payment(cur, conn, out_trade_no: str, base_amount, config: dict, timeout_seconds: int) -> dict:
@@ -220,37 +234,49 @@ def parse_usdt_transfers(block: dict, client) -> Iterable[TronUsdtTransfer]:
     block_number = int(block.get("block_header", {}).get("raw_data", {}).get("number", 0) or 0)
 
     for trx in transactions:
-        if not _is_success_transaction(trx):
+        # 链上区块里可能存在异常交易，单笔失败不能阻断整块进度。
+        try:
+            transfer = _parse_usdt_transfer(trx, block_number, client)
+        except Exception as exc:
+            print(f"⚠️ 跳过异常USDT交易: tx={trx.get('txID', '')} err={exc}")
             continue
-        raw_contracts = trx.get("raw_data", {}).get("contract") or []
-        if not raw_contracts:
-            continue
-        contract = raw_contracts[0]
-        if contract.get("type") != "TriggerSmartContract":
-            continue
+        if transfer:
+            yield transfer
 
-        value = contract.get("parameter", {}).get("value", {})
-        data = value.get("data")
-        if not data or not data.startswith(TRANSFER_METHOD_ID):
-            continue
 
-        contract_address = client.to_base58check_address(value.get("contract_address"))
-        if contract_address != USDT_TRC20_CONTRACT:
-            continue
+def _parse_usdt_transfer(trx: dict, block_number: int, client) -> Optional[TronUsdtTransfer]:
+    """Parse one successful TRC20-USDT transfer transaction if it matches."""
+    if not _is_success_transaction(trx):
+        return None
+    raw_contracts = trx.get("raw_data", {}).get("contract") or []
+    if not raw_contracts:
+        return None
+    contract = raw_contracts[0]
+    if contract.get("type") != "TriggerSmartContract":
+        return None
 
-        raw_amount = int(data[-64:], 16)
-        if raw_amount <= 0:
-            continue
+    value = contract.get("parameter", {}).get("value", {})
+    data = value.get("data")
+    if not data or not data.startswith(TRANSFER_METHOD_ID):
+        return None
 
-        yield TronUsdtTransfer(
-            txid=trx.get("txID", ""),
-            block_number=block_number,
-            from_address=client.to_base58check_address(value.get("owner_address")),
-            to_address=client.to_base58check_address("41" + data[8:72][-40:]),
-            amount=(Decimal(raw_amount) / USDT_DECIMALS).quantize(Decimal("0.000001")),
-            raw_amount=raw_amount,
-            timestamp=int(trx.get("raw_data", {}).get("timestamp") or int(time.time() * 1000)),
-        )
+    contract_address = client.to_base58check_address(value.get("contract_address"))
+    if contract_address != USDT_TRC20_CONTRACT:
+        return None
+
+    raw_amount = int(data[-64:], 16)
+    if raw_amount <= 0:
+        return None
+
+    return TronUsdtTransfer(
+        txid=trx.get("txID", ""),
+        block_number=block_number,
+        from_address=client.to_base58check_address(value.get("owner_address")),
+        to_address=client.to_base58check_address("41" + data[8:72][-40:]),
+        amount=Decimal(raw_amount_to_text(raw_amount)),
+        raw_amount=raw_amount,
+        timestamp=int(trx.get("raw_data", {}).get("timestamp") or int(time.time() * 1000)),
+    )
 
 
 def _generate_unique_pay_amount(cur, base_amount, monitor_address: str, now_ts: int) -> Decimal:
@@ -325,7 +351,7 @@ INSERT OR IGNORE INTO usdt_chain_transactions (
             transfer.block_number,
             transfer.from_address,
             transfer.to_address,
-            fmt_chain_amount(transfer.amount),
+            raw_amount_to_text(transfer.raw_amount),
             str(transfer.raw_amount),
             transfer.timestamp,
             int(time.time()),
@@ -336,40 +362,42 @@ INSERT OR IGNORE INTO usdt_chain_transactions (
 
 def _match_transfer_to_order(cur, conn, transfer: TronUsdtTransfer) -> Optional[str]:
     """Match one transfer by exact unique amount and return the order number."""
-    pay_amount = fmt_amount(transfer.amount)
-    if transfer.amount != Decimal(pay_amount):
-        return None
-    row = cur.execute(
+    rows = cur.execute(
         """
-SELECT p.out_trade_no
+SELECT p.out_trade_no, p.pay_amount
 FROM usdt_direct_payments p
 JOIN orders o ON o.out_trade_no=p.out_trade_no
 WHERE p.status='pending'
   AND o.status='pending'
   AND p.monitor_address=?
-  AND p.pay_amount=?
   AND p.expire_time>=?
 ORDER BY p.create_time ASC
-LIMIT 1
 """,
-        (transfer.to_address, pay_amount, int(time.time())),
-    ).fetchone()
-    if not row:
+        (transfer.to_address, int(time.time())),
+    ).fetchall()
+    matched_order = None
+    for out_trade_no, pay_amount in rows:
+        try:
+            if payment_amount_to_raw(pay_amount) == transfer.raw_amount:
+                matched_order = out_trade_no
+                break
+        except Exception:
+            continue
+    if not matched_order:
         return None
 
-    out_trade_no = row[0]
     cur.execute(
         """
 UPDATE usdt_direct_payments
 SET status='paid', matched_txid=?
 WHERE out_trade_no=? AND status='pending'
 """,
-        (transfer.txid, out_trade_no),
+        (transfer.txid, matched_order),
     )
     cur.execute(
         "UPDATE usdt_chain_transactions SET out_trade_no=? WHERE txid=?",
-        (out_trade_no, transfer.txid),
+        (matched_order, transfer.txid),
     )
     conn.commit()
 
-    return out_trade_no
+    return matched_order
