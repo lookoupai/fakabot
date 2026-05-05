@@ -19,7 +19,9 @@
       "name": "USDT(TRC20直付)",
       "enabled": true,
       "priority": 20,
-      "timeout_seconds": 3600
+      "timeout_seconds": 3600,
+      "cny_per_usdt": "7.20",
+      "min_usdt_amount": "1.00"
     }
   },
   "USDT_SCAN": {

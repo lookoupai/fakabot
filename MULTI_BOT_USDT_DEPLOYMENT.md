@@ -262,7 +262,9 @@ cat > "$config_path" <<JSON
       "name": "USDT(TRC20直付)",
       "enabled": true,
       "priority": 20,
-      "timeout_seconds": 3600
+      "timeout_seconds": 3600,
+      "cny_per_usdt": "7.20",
+      "min_usdt_amount": "1.00"
     }
   },
   "USDT_SCAN": {
@@ -652,8 +654,10 @@ curl -I https://pay.unishopasa.cn/bot16/health
 3. 管理员发送 `/admin`。
 4. 进入支付配置。
 5. 配置 `USDT(TRC20直付)` 收款地址。
-6. 开启 `USDT(TRC20直付)`。
-7. 根据需要配置支付宝、商品、公告、发货群。
+6. 配置 USDT 汇率，例如 `1 USDT = 7.20 CNY`。
+7. 配置 USDT 最小支付金额，默认建议 `1.00 USDT`。
+8. 开启 `USDT(TRC20直付)`。
+9. 根据需要配置支付宝、商品、公告、发货群。
 
 建议每个机器人使用不同 USDT 收款地址：
 
@@ -1013,7 +1017,9 @@ mkdir -p bot-a/data bot-b/data shared
       "name": "USDT(TRC20直付)",
       "enabled": false,
       "priority": 20,
-      "timeout_seconds": 3600
+      "timeout_seconds": 3600,
+      "cny_per_usdt": "7.20",
+      "min_usdt_amount": "1.00"
     }
   },
   "USDT_SCAN": {
@@ -1030,9 +1036,12 @@ mkdir -p bot-a/data bot-b/data shared
 - `DOMAIN` 每个机器人按自己的访问域名配置。
 - `USDT_SCAN.mode` 必须是 `match_only`。
 - `PAYMENTS.usdt_trc20_direct.timeout_seconds` 仍有用，用于控制 USDT 订单过期时间。
+- `PAYMENTS.usdt_trc20_direct.cny_per_usdt` 是后台未设置时的汇率兜底，例如 `7.20` 表示 `1 USDT = 7.20 CNY`。
+- `PAYMENTS.usdt_trc20_direct.min_usdt_amount` 是后台未设置时的最小USDT金额兜底，默认建议 `1.00`。
 - `tron_api_key`、`start_block`、`confirmations`、`max_blocks_per_scan` 这类扫链字段不要放在业务机器人支付通道里，因为 `match_only` 不会请求 TronGrid。
 - 共享扫链参数只放在 `scanner` 的 `USDT_SCAN` 里。
 - 后台配置的 USDT 收款地址仍在机器人自己的管理后台设置，不写在配置文件里。
+- 商品价格仍填写人民币；用户选择 USDT 时系统会按后台汇率换算为 USDT，低于最小USDT金额时会阻止下单。
 
 机器人 B、机器人 C 复制同样结构，只改自己的 `BOT_TOKEN`、`DOMAIN`、商品、支付参数和后台收款地址。
 
@@ -1333,6 +1342,16 @@ sqlite3 /shared/usdt_chain.db "select txid, block_number, to_address, amount, tx
 业务机器人推荐：
 
 ```json
+"PAYMENTS": {
+  "usdt_trc20_direct": {
+    "name": "USDT(TRC20直付)",
+    "enabled": true,
+    "priority": 20,
+    "timeout_seconds": 3600,
+    "cny_per_usdt": "7.20",
+    "min_usdt_amount": "1.00"
+  }
+},
 "USDT_SCAN": {
   "mode": "match_only",
   "shared_store": "/shared/usdt_chain.db",
@@ -1361,6 +1380,8 @@ sqlite3 /shared/usdt_chain.db "select txid, block_number, to_address, amount, tx
 - 只有一个服务配置 `USDT_SCAN.mode=shared_scanner`。
 - 所有服务挂载同一个 `/shared`。
 - 每个机器人后台已配置 USDT 收款地址。
+- 每个机器人后台已配置 USDT 汇率。
+- 每个机器人后台已配置 USDT 最小支付金额。
 - 每个机器人后台已开启 `USDT(TRC20直付)`。
 - 共享扫链服务日志没有持续 429。
 - 测试订单可以匹配并自动发货。

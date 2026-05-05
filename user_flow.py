@@ -5,6 +5,7 @@ import secrets
 import time
 import hashlib
 import requests
+from decimal import Decimal, ROUND_UP
 from io import BytesIO
 from typing import Any, Dict
 
@@ -288,6 +289,42 @@ def register_user_handlers(application: Application, deps: Dict[str, Any]):
         admin_address = (_get_setting("payment.usdt_trc20_direct.monitor_address", "") or "").strip()
         config["monitor_address"] = admin_address
         return config
+
+    def _get_positive_decimal_setting(key: str, config_key: str, default: str) -> Decimal:
+        """读取后台优先的正数配置，用于USDT汇率和最小金额。"""
+        raw = (_get_setting(key, "") or "").strip()
+        if not raw:
+            raw = str(PAYCFG.get("usdt_trc20_direct", {}).get(config_key, default) or default)
+        try:
+            value = Decimal(str(raw))
+        except Exception:
+            value = Decimal(default)
+        if value <= 0:
+            return Decimal(default)
+        return value
+
+    def get_usdt_cny_per_usdt() -> Decimal:
+        """获取人民币兑USDT固定汇率，含后台设置和配置兜底。"""
+        return _get_positive_decimal_setting(
+            "payment.usdt_trc20_direct.cny_per_usdt",
+            "cny_per_usdt",
+            "7.20",
+        )
+
+    def get_usdt_min_amount() -> Decimal:
+        """获取USDT最小支付金额，避免低价订单产生过小链上金额。"""
+        return _get_positive_decimal_setting(
+            "payment.usdt_trc20_direct.min_usdt_amount",
+            "min_usdt_amount",
+            "1.00",
+        )
+
+    def convert_rmb_to_usdt_amount(rmb_amount) -> Decimal:
+        """将人民币商品价换算为两位小数USDT金额，向上取整避免少收。"""
+        return (Decimal(str(rmb_amount)) / get_usdt_cny_per_usdt()).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_UP,
+        )
 
     # ---------------- 用户端功能：命令与回调 ----------------
 
@@ -757,6 +794,7 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
             pass
         
         direct_payment_info = None
+        usdt_base_amount = None
         # 如果使用预加载订单，直接跳到显示部分
         if use_preloaded:
             out_trade_no = use_preloaded['out_trade_no']
@@ -817,6 +855,20 @@ WHERE p.id=? AND COALESCE(p.status,'on')='on'
                         reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
                     )
                     return
+                usdt_base_amount = convert_rmb_to_usdt_amount(price)
+                min_usdt_amount = get_usdt_min_amount()
+                if usdt_base_amount < min_usdt_amount:
+                    await _delete_last_and_send_text(
+                        update.effective_chat.id,
+                        t(
+                            "payment.usdt_min_amount",
+                            lang,
+                            min_amount=f"{min_usdt_amount:.2f}",
+                            converted_amount=f"{usdt_base_amount:.2f}",
+                        ),
+                        reply_markup=make_markup([_back(f"buy:{pid}:{tier_id}" if tier_id else f"buy:{pid}", lang)])
+                    )
+                    return
             else:
                 ok, pay_url, err = create_payment(channel, subject, price, out_trade_no)
                 if not ok:
@@ -863,11 +915,13 @@ WHERE status='pending'
                         pass
 
                     if channel == "usdt_trc20_direct":
+                        if usdt_base_amount is None:
+                            usdt_base_amount = convert_rmb_to_usdt_amount(price)
                         direct_payment_info = create_direct_payment(
                             cur,
                             conn,
                             out_trade_no,
-                            price,
+                            usdt_base_amount,
                             get_usdt_direct_config(),
                             get_payment_timeout_seconds(channel),
                         )
@@ -935,6 +989,7 @@ WHERE status='pending'
                 f"{t('payment.order_no', lang, out_trade_no=out_trade_no)}\n"
                 f"{t('payment.product_name', lang, subject=subject)}\n"
                 f"{t('payment.product_detail', lang, detail=detail)}\n"
+                f"{t('payment.price', lang, price=_fmt_price(price))}\n"
                 f"{t('payment.usdt_direct_amount', lang, amount=pay_amount)}\n"
                 f"{t('payment.method', lang, method=method_name)}\n"
                 f"{t('payment.wallet', lang, address=usdt_address)}\n"

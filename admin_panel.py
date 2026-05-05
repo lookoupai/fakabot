@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 import io
+from decimal import Decimal, InvalidOperation
 from typing import Callable, Any, Dict
 
 from telegram import Update, InlineKeyboardButton
@@ -94,6 +95,31 @@ def register_admin_handlers(app: Application, deps: Dict[str, Any]):
     def _get_usdt_direct_address() -> str:
         """USDT直付收款地址只允许从后台设置读取。"""
         return (_get_setting("payment.usdt_trc20_direct.monitor_address", "") or "").strip()
+
+    def _get_positive_decimal_setting(key: str, default: str) -> Decimal:
+        """读取正数后台配置，用于支付设置页展示。"""
+        raw = (_get_setting(key, default) or default).strip()
+        try:
+            value = Decimal(raw)
+        except (InvalidOperation, ValueError):
+            value = Decimal(default)
+        if value <= 0:
+            return Decimal(default)
+        return value
+
+    def _get_usdt_cny_per_usdt() -> Decimal:
+        """获取后台维护的人民币兑USDT固定汇率。"""
+        return _get_positive_decimal_setting(
+            "payment.usdt_trc20_direct.cny_per_usdt",
+            "7.20",
+        )
+
+    def _get_usdt_min_amount() -> Decimal:
+        """获取后台维护的USDT最小支付金额。"""
+        return _get_positive_decimal_setting(
+            "payment.usdt_trc20_direct.min_usdt_amount",
+            "1.00",
+        )
 
     payment_channels = ["kavip_alipay", "usdt_trc20_direct"]
     payment_default_order = "kavip_alipay,usdt_trc20_direct"
@@ -666,6 +692,8 @@ WHERE t.product_id=? AND t.id=?
         if action == "pay":
             cur_cols = (_get_setting("ui.payment_cols", str(START_CFG.get("payment_cols") or "3")) or "3").strip()
             usdt_direct_address = _get_usdt_direct_address()
+            usdt_cny_per_usdt = _get_usdt_cny_per_usdt()
+            usdt_min_amount = _get_usdt_min_amount()
             
             # 获取支付方式开关状态
             def get_payment_status(channel):
@@ -722,6 +750,8 @@ WHERE t.product_id=? AND t.id=?
             kb = make_markup([
                 [InlineKeyboardButton(f"🧩 每行支付按钮：{cur_cols}", callback_data="adm:pay_cols")],
                 [InlineKeyboardButton("💳 USDT直付收款地址", callback_data="adm:pay_usdt_address")],
+                [InlineKeyboardButton(f"💱 USDT汇率：{usdt_cny_per_usdt:.2f} CNY/USDT", callback_data="adm:pay_usdt_rate")],
+                [InlineKeyboardButton(f"🔻 USDT最小金额：{usdt_min_amount:.2f} USDT", callback_data="adm:pay_usdt_min")],
                 *payment_buttons,
                 row_home_admin(),
             ])
@@ -729,9 +759,37 @@ WHERE t.product_id=? AND t.id=?
                 "💳 支付设置\n"
                 f"每行按钮数：{cur_cols} (1-4)\n"
                 f"USDT直付收款地址：{usdt_direct_address or '未设置'}\n"
+                f"USDT汇率：1 USDT = {usdt_cny_per_usdt:.2f} CNY\n"
+                f"USDT最小支付金额：{usdt_min_amount:.2f} USDT\n"
                 "\n📋 支付方式管理：\n"
                 "• 点击支付方式名称：开启/关闭\n"
                 "• 点击 ⬆️ ⬇️：调整显示顺序"
+            )
+            await _send_text(update.effective_chat.id, text, reply_markup=kb)
+            return
+
+        # 支付设置：配置 USDT 人民币汇率
+        if action == "pay_usdt_rate":
+            ctx.user_data["adm_wait"] = {"type": "pay_usdt_rate", "data": {}}
+            current_rate = _get_usdt_cny_per_usdt()
+            kb = make_markup([row_back("adm:pay")])
+            text = (
+                "请输入 USDT 人民币汇率：\n"
+                "格式：正数，例如 7.20，表示 1 USDT = 7.20 CNY。\n\n"
+                f"当前汇率：{current_rate:.2f} CNY/USDT"
+            )
+            await _send_text(update.effective_chat.id, text, reply_markup=kb)
+            return
+
+        # 支付设置：配置 USDT 最小支付金额
+        if action == "pay_usdt_min":
+            ctx.user_data["adm_wait"] = {"type": "pay_usdt_min", "data": {}}
+            current_min_amount = _get_usdt_min_amount()
+            kb = make_markup([row_back("adm:pay")])
+            text = (
+                "请输入 USDT 最小支付金额：\n"
+                "格式：正数，例如 1 或 1.00。\n\n"
+                f"当前最小金额：{current_min_amount:.2f} USDT"
             )
             await _send_text(update.effective_chat.id, text, reply_markup=kb)
             return
@@ -2140,6 +2198,60 @@ WHERE t.product_id=? AND t.id=?
             try:
                 _set_setting("payment.usdt_trc20_direct.monitor_address", val)
                 await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存USDT直付收款地址", ttl=2)
+            except Exception:
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "❗ 保存失败", ttl=2)
+            ctx.user_data.pop("adm_wait", None)
+            await adm_router(type("obj", (), {
+                "callback_query": type("q", (), {"data": "adm:pay"}),
+                "effective_user": update.effective_user,
+                "effective_chat": update.effective_chat,
+                "get_bot": update.get_bot,
+            })(), ctx)
+            return
+
+        # 保存 USDT 人民币汇率（支付设置）
+        if kind == "pay_usdt_rate":
+            val = text.strip()
+            try:
+                rate = Decimal(val)
+                if rate <= 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError):
+                await update.message.reply_text(
+                    "格式不正确，请输入正数汇率，例如 7.20：",
+                    reply_markup=make_markup([row_back("adm:pay")]),
+                )
+                return
+            try:
+                _set_setting("payment.usdt_trc20_direct.cny_per_usdt", f"{rate:.2f}")
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存USDT汇率", ttl=2)
+            except Exception:
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "❗ 保存失败", ttl=2)
+            ctx.user_data.pop("adm_wait", None)
+            await adm_router(type("obj", (), {
+                "callback_query": type("q", (), {"data": "adm:pay"}),
+                "effective_user": update.effective_user,
+                "effective_chat": update.effective_chat,
+                "get_bot": update.get_bot,
+            })(), ctx)
+            return
+
+        # 保存 USDT 最小支付金额（支付设置）
+        if kind == "pay_usdt_min":
+            val = text.strip()
+            try:
+                min_amount = Decimal(val)
+                if min_amount <= 0:
+                    raise ValueError
+            except (InvalidOperation, ValueError):
+                await update.message.reply_text(
+                    "格式不正确，请输入正数金额，例如 1 或 1.00：",
+                    reply_markup=make_markup([row_back("adm:pay")]),
+                )
+                return
+            try:
+                _set_setting("payment.usdt_trc20_direct.min_usdt_amount", f"{min_amount:.2f}")
+                await send_ephemeral(update.get_bot(), update.effective_chat.id, "✅ 已保存USDT最小支付金额", ttl=2)
             except Exception:
                 await send_ephemeral(update.get_bot(), update.effective_chat.id, "❗ 保存失败", ttl=2)
             ctx.user_data.pop("adm_wait", None)
