@@ -1402,4 +1402,14 @@ for bot in bot01 bot02 bot03 bot04 bot05 bot06; do
     "/opt/fakabot-cluster/${bot}/fakabot/"
 done
 
+你在服务器上检查：
 
+
+grep -n "pay_usdt_rate\|pay_usdt_min\|USDT汇率\|USDT最小" \
+  /opt/fakabot-cluster/bot01/fakabot/admin_panel.py
+
+如果宿主机有输出，再检查容器内代码：
+
+
+docker exec -it fakabot-bot01 sh -c \
+  "grep -n 'pay_usdt_rate\\|pay_usdt_min\\|USDT汇率\\|USDT最小' /app/admin_panel.py"
