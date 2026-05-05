@@ -1386,3 +1386,20 @@ sqlite3 /shared/usdt_chain.db "select txid, block_number, to_address, amount, tx
 - 共享扫链服务日志没有持续 429。
 - 测试订单可以匹配并自动发货。
 
+
+同步代码到scanner和六个业务机器人。排除生产配置和数据
+rsync -a --delete \
+  --exclude config.json \
+  --exclude data/ \
+  /opt/fakabot-cluster/source/ \
+  /opt/fakabot-cluster/scanner/fakabot/
+
+for bot in bot01 bot02 bot03 bot04 bot05 bot06; do
+  rsync -a --delete \
+    --exclude config.json \
+    --exclude data/ \
+    /opt/fakabot-cluster/source/ \
+    "/opt/fakabot-cluster/${bot}/fakabot/"
+done
+
+
