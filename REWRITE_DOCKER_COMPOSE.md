@@ -47,11 +47,11 @@ ports:
 /opt/fakabot-cluster/shared
 ```
 
-每个机器人使用自己的业务数据目录：
+每个机器人使用项目目录内原来的业务数据目录：
 
 ```text
-/opt/fakabot-cluster/bot01/data
-/opt/fakabot-cluster/bot02/data
+/opt/fakabot-cluster/bot01/fakabot/data
+/opt/fakabot-cluster/bot02/fakabot/data
 ...
 ```
 
@@ -125,7 +125,7 @@ services:
       - "127.0.0.1:${extra_port}:58002"
     volumes:
       - ./config.json:/app/config.json:ro
-      - /opt/fakabot-cluster/${bot}/data:/app/data
+      - ./data:/app/data
       - /opt/fakabot-cluster/shared:/shared
     networks:
       - fakabot_${bot}_network
