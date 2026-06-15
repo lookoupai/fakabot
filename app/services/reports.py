@@ -20,7 +20,7 @@ from app.db.models.reports import ExportJob
 from app.db.models.tenants import AuditLog, Tenant
 from app.services.files import FileStorageService
 
-SUPPORTED_REPORT_TYPES = {"orders", "payments", "inventory", "ledger"}
+SUPPORTED_REPORT_TYPES = {"orders", "payments", "inventory", "ledger", "products"}
 SUPPORTED_SCOPE_TYPES = {"tenant", "platform"}
 SUPPORTED_EXPORT_JOB_STATUSES = {"pending", "running", "completed", "failed", "expired"}
 EXPORT_DOWNLOAD_TTL_HOURS = 24
@@ -261,6 +261,8 @@ class ReportExportService:
                 row_count = await self._write_inventory(session, job, writer)
             elif job.report_type == "ledger":
                 row_count = await self._write_ledger(session, job, writer)
+            elif job.report_type == "products":
+                row_count = await self._write_products(session, job, writer)
             else:
                 raise ValueError("不支持的报表类型")
         os.replace(temp_path, target_path)
@@ -478,6 +480,99 @@ class ReportExportService:
             count += 1
         return count
 
+    async def _write_products(self, session: AsyncSession, job: ExportJob, writer: Any) -> int:
+        """
+        写入商品报表
+
+        导出字段：商品ID、名称、分类、排序、状态、发货类型、价格、币种、可用库存、创建时间、更新时间
+        安全边界：不导出库存明文、文件storage key、外部映射、供应商/代理商信息
+        """
+        writer.writerow(
+            [
+                "商品ID",
+                "商品名称",
+                "分类",
+                "排序",
+                "状态",
+                "发货类型",
+                "价格",
+                "币种",
+                "可用库存",
+                "创建时间",
+                "更新时间",
+            ]
+        )
+
+        # 查询商品和库存统计
+        query = (
+            select(
+                Product.id,
+                Product.name,
+                Product.category,
+                Product.sort_order,
+                Product.status,
+                Product.delivery_type,
+                ProductVariant.price,
+                ProductVariant.currency,
+                func.count(InventoryItem.id).filter(InventoryItem.status == "available"),
+                Product.created_at,
+                Product.updated_at,
+            )
+            .outerjoin(
+                ProductVariant,
+                (ProductVariant.product_id == Product.id)
+                & (ProductVariant.tenant_id == Product.tenant_id)
+                & (ProductVariant.is_default == True),
+            )
+            .outerjoin(
+                InventoryItem,
+                (InventoryItem.product_id == Product.id)
+                & (InventoryItem.variant_id == ProductVariant.id)
+                & (InventoryItem.tenant_id == Product.tenant_id),
+            )
+            .where(Product.status != "deleted")
+            .group_by(
+                Product.id,
+                Product.name,
+                Product.category,
+                Product.sort_order,
+                Product.status,
+                Product.delivery_type,
+                ProductVariant.price,
+                ProductVariant.currency,
+                Product.created_at,
+                Product.updated_at,
+            )
+            .order_by(Product.id.asc())
+        )
+
+        if job.tenant_id is not None:
+            query = query.where(Product.tenant_id == job.tenant_id)
+
+        result = await session.execute(query)
+        count = 0
+        for row in result.all():
+            product_id, name, category, sort_order, status, delivery_type, price, currency, available_count, created_at, updated_at = row
+            writer.writerow(
+                self._csv_row(
+                    [
+                        product_id,
+                        name,
+                        category or "",
+                        sort_order,
+                        status,
+                        delivery_type,
+                        price or Decimal("0"),
+                        currency or "USDT",
+                        int(available_count or 0),
+                        created_at,
+                        updated_at,
+                    ]
+                )
+            )
+            count += 1
+        return count
+
     async def _expire_completed_exports(self, session: AsyncSession, limit: int) -> int:
         result = await session.execute(
             select(ExportJob)
@@ -560,7 +655,7 @@ class ReportExportService:
         if not normalized or normalized == "all":
             return None
         if normalized not in SUPPORTED_REPORT_TYPES:
-            raise ValueError("报表类型必须是 orders、payments、inventory、ledger 或 all")
+            raise ValueError("报表类型必须是 orders、payments、inventory、ledger、products 或 all")
         return normalized
 
     @staticmethod
