@@ -99,13 +99,12 @@ class PaymentRetryWorker(BaseWorker):
                 # 调用对应 provider 的回调处理
                 await self._process_provider_callback(session, callback, provider, payload)
 
-                # 标记为成功（注意：实际需要更新 callback 记录）
-                # callback.process_status = "success"
-                # callback.processed_at = now
-                # 由于 PaymentCallback 模型暂无 retry_count 字段，
-                # 这里只记录日志，实际实现需要先执行数据库迁移
+                # 标记为成功
+                callback.process_status = "success"
+                callback.processed_at = now
+                callback.retry_count = next_retry_count
 
-                logger.info(f"Payment callback {callback.id} retry completed")
+                logger.info(f"Payment callback {callback.id} retry succeeded")
                 count += 1
 
             except Exception as e:
@@ -113,10 +112,10 @@ class PaymentRetryWorker(BaseWorker):
                     f"Payment callback {callback.id} retry failed: {e}",
                     exc_info=True,
                 )
-                # 实际需要更新：
-                # callback.retry_count += 1
-                # callback.last_retry_at = now
-                # callback.failure_reason = str(e)[:500]
+                # 更新重试信息
+                callback.retry_count = next_retry_count
+                callback.last_retry_at = now
+                callback.failure_reason = str(e)[:500]
 
         return count
 
