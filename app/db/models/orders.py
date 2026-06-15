@@ -94,6 +94,9 @@ class PaymentCallback(Base):
     payload_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
     process_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     error_message: Mapped[Optional[str]] = mapped_column(Text)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
