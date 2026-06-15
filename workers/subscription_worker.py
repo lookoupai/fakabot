@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.db.models.subscriptions import TenantSubscription
 from app.db.models.tenants import AuditLog, Tenant
 from app.db.session import get_session_factory
+from app.services.telegram_notifications import TelegramNotificationService
 from workers.base import BaseWorker
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,11 @@ class SubscriptionWorker(BaseWorker):
             redis_client=redis_client,
         )
         self.settings = get_settings()
+        # 初始化 Telegram 通知服务
+        bot_token = None
+        if self.settings.master_bot_token:
+            bot_token = self.settings.master_bot_token.get_secret_value()
+        self.notification_service = TelegramNotificationService(bot_token=bot_token)
 
     async def process(self):
         """处理订阅生命周期事件"""
@@ -98,7 +104,18 @@ class SubscriptionWorker(BaseWorker):
                 )
             )
 
-            # TODO: 发送 Telegram 通知
+            # 发送 Telegram 通知
+            if tenant.owner_telegram_user_id:
+                try:
+                    await self.notification_service.send_period_ending_reminder(
+                        telegram_user_id=tenant.owner_telegram_user_id,
+                        tenant_name=tenant.store_name or "您的店铺",
+                        plan_name=subscription.plan_code or "当前套餐",
+                        days_remaining=1,
+                        renew_url=None,  # TODO: 生成续费链接
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send period ending notice to tenant {subscription.tenant_id}: {e}")
             logger.info(
                 f"Trial ended for tenant {subscription.tenant_id}, "
                 f"moved to grace period until {subscription.grace_ends_at}"
@@ -145,7 +162,18 @@ class SubscriptionWorker(BaseWorker):
                 )
             )
 
-            # TODO: 发送 Telegram 通知
+            # 发送 Telegram 通知
+            if tenant.owner_telegram_user_id:
+                try:
+                    await self.notification_service.send_period_ending_reminder(
+                        telegram_user_id=tenant.owner_telegram_user_id,
+                        tenant_name=tenant.store_name or "您的店铺",
+                        plan_name=subscription.plan_code or "当前套餐",
+                        days_remaining=1,
+                        renew_url=None,  # TODO: 生成续费链接
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send period ending notice to tenant {subscription.tenant_id}: {e}")
             logger.info(
                 f"Period ended for tenant {subscription.tenant_id}, "
                 f"moved to grace period until {subscription.grace_ends_at}"
@@ -196,7 +224,17 @@ class SubscriptionWorker(BaseWorker):
             )
 
             # TODO: 清理 Webhook 缓存
-            # TODO: 发送 Telegram 通知
+            # 发送 Telegram 通知
+            if tenant.owner_telegram_user_id:
+                try:
+                    await self.notification_service.send_service_suspended_notice(
+                        telegram_user_id=tenant.owner_telegram_user_id,
+                        tenant_name=tenant.store_name or "您的店铺",
+                        retention_days=30,
+                        renew_url=None,  # TODO: 生成续费链接
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send suspended notice to tenant {subscription.tenant_id}: {e}")
             logger.warning(
                 f"Grace period ended for tenant {subscription.tenant_id}, "
                 f"service suspended, data retention until {subscription.data_retention_until}"
@@ -237,7 +275,17 @@ class SubscriptionWorker(BaseWorker):
                 )
             )
 
-            # TODO: 发送最后通知
+            # 发送最后通知
+            if tenant.owner_telegram_user_id:
+                try:
+                    await self.notification_service.send_retention_ending_notice(
+                        telegram_user_id=tenant.owner_telegram_user_id,
+                        tenant_name=tenant.store_name or "您的店铺",
+                        days_remaining=7,
+                        renew_url=None,  # TODO: 生成续费链接
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send retention ending notice to tenant {subscription.tenant_id}: {e}")
             logger.warning(
                 f"Retention period ended for tenant {subscription.tenant_id}, "
                 f"marked for cleanup (data not deleted)"
