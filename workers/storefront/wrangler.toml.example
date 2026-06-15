@@ -1,0 +1,8 @@
+name = "fakabot-storefront"
+main = "src/worker.mjs"
+compatibility_date = "2026-06-08"
+
+[vars]
+PUBLIC_STORE_API_BASE_URL = "https://api.example.com"
+DEFAULT_TENANT_PUBLIC_ID = "demo"
+DEFAULT_STORE_TITLE = "发卡店铺"

@@ -27,10 +27,10 @@ COPY . .
 
 # 创建非 root 用户并准备数据目录
 RUN useradd -m -u 10001 appuser \
-    && mkdir -p /app/data \
+    && mkdir -p /app/data /app/storage \
     && chown -R appuser:appuser /app
 
 USER appuser
 
 EXPOSE 58001
-CMD ["python", "bot.py"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "58001"]

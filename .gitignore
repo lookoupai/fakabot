@@ -6,6 +6,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -31,6 +32,9 @@ data/
 *.sqlite3
 
 # Config
+.env
+.env.*
+!.env.example
 config.json
 license.key
 *.backup
@@ -39,6 +43,7 @@ license.key
 # Logs
 *.log
 logs/
+storage/
 
 # Docker
 docker-compose.yml.backup.*
@@ -56,6 +61,15 @@ docker-compose.yml.old
 tmp/
 temp/
 *.tmp
+node_modules/
+package.json
+package-lock.json
+
+# Web admin source and dependency lock
+!web/admin/package.json
+!web/admin/package-lock.json
+!web/admin/src/lib/
+!web/admin/src/lib/**
 
 # Screenshots
 screenshots/
@@ -64,3 +78,4 @@ screenshots/
 !assets/**/*.png
 *.jpg
 *.jpeg
+.ace-tool/

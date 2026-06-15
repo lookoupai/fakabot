@@ -3,6 +3,16 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+dist/
+downloads/
+*.egg-info/
+.eggs/
 
 # VCS
 .git/
@@ -11,12 +21,27 @@ __pycache__/
 # Local artifacts
 *.log
 *.html
+logs/
+tmp/
+temp/
+node_modules/
+package.json
+package-lock.json
 
 # Sensitive/runtime data
+.env
+.env.*
 config.json
+license.key
 sp_shop.db
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
 bot.log
 last_gateway_response.html
+data/
+storage/
 
 # IDE
 .vscode/

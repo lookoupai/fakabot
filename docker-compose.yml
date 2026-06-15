@@ -1,4 +1,27 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: fakabot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fakabot
+      POSTGRES_USER: fakabot
+      POSTGRES_PASSWORD: fakabot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - fakabot_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fakabot -d fakabot"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   redis:
     image: redis:7-alpine
     container_name: fakabot-redis
@@ -19,29 +42,31 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  sp_shop_bot:
+  app:
     build: .
     container_name: fakabot
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
     environment:
       - TZ=Asia/Shanghai
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - DATABASE_URL=postgresql+asyncpg://fakabot:fakabot@postgres:5432/fakabot
+      - REDIS_URL=redis://redis:6379/0
     user: "0:0"
     ports:
       - "127.0.0.1:58001:58001"
-      - "127.0.0.1:58002:58002"
     volumes:
-      - ./config.json:/app/config.json:ro
-      - ./data:/app/data
-      - usdt_chain_data:/shared
+      - ./storage:/app/storage
     networks:
       - fakabot_network
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:58001/health\", timeout=3).read().strip()==b\"ok\" else 1)'"]
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if b\"ok\" in urllib.request.urlopen(\"http://127.0.0.1:58001/ready\", timeout=3).read() else 1)'"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -79,6 +104,8 @@ networks:
     driver: bridge
 
 volumes:
+  postgres_data:
+    driver: local
   redis_data:
     driver: local
   usdt_chain_data:

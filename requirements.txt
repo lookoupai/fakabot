@@ -1,5 +1,15 @@
 python-telegram-bot[job-queue,webhooks]==20.6
 Flask==3.0.3
+aiogram>=3.4,<4.0
+fastapi>=0.110,<1.0
+python-multipart>=0.0.9,<1.0
+uvicorn[standard]>=0.27,<1.0
+httpx>=0.25,<1.0
+sqlalchemy[asyncio]>=2.0,<3.0
+asyncpg>=0.29,<1.0
+alembic>=1.13,<2.0
+pydantic-settings>=2.2,<3.0
+cryptography>=42.0,<46.0
 requests==2.31.0
 qrcode==7.4.2
 Pillow==10.2.0
