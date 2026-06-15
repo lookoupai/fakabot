@@ -1208,6 +1208,16 @@ function PlatformPaymentProviderRow({
   )
 }
 
+type PlatformPlanFieldKey = "code" | "name" | "monthlyPrice" | "trialDays" | "graceDays"
+type PlatformPlanFieldErrors = Partial<Record<PlatformPlanFieldKey, string>>
+type PlatformPlanDraft = {
+  code?: string
+  name: string
+  monthlyPrice: string
+  trialDays: string
+  graceDays: string
+}
+
 function PlatformSubscriptionPlansPanel({
   plans,
   actionId,
@@ -1217,11 +1227,16 @@ function PlatformSubscriptionPlansPanel({
   actionId: string | null
   onRunAction: PlatformActionRunner
 }) {
+  const enabledPlanCount = plans.filter((plan) => plan.enabled).length
+
   return (
     <section className="flex flex-col gap-3 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium">订阅计划</p>
-        <Badge variant="outline">{plans.length}</Badge>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">订阅计划</p>
+          <p className="mt-1 text-xs text-muted-foreground">创建和编辑只更新套餐配置，不创建账单或真实支付订单。</p>
+        </div>
+        <Badge variant="outline">{enabledPlanCount} / {plans.length} 启用</Badge>
       </div>
       <PlatformPlanCreateForm actionId={actionId} onRunAction={onRunAction} />
       {plans.length === 0 ? <StatusBlock title="暂无订阅计划" detail="可创建第一个平台套餐。" /> : null}
@@ -1230,7 +1245,10 @@ function PlatformSubscriptionPlansPanel({
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{plan.name}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="truncate text-sm font-medium">{plan.name}</p>
+                  <Badge variant={plan.enabled ? "secondary" : "outline"}>{plan.enabled ? "已启用" : "已停用"}</Badge>
+                </div>
                 <p className="mt-1 text-xs text-muted-foreground">
                   {plan.code} · {plan.monthly_price} {plan.currency} · 试用 {plan.trial_days} 天 · 宽限 {plan.grace_days} 天
                 </p>
@@ -1256,6 +1274,14 @@ function PlatformSubscriptionPlansPanel({
                 {actionId === `plan:status:${plan.code}` ? "处理中" : plan.enabled ? "停用" : "启用"}
               </Button>
             </div>
+            <div className="grid gap-2 rounded-md bg-muted/30 p-3 sm:grid-cols-2">
+              <MetricLine label="启用状态" value={plan.enabled ? "已启用" : "已停用"} />
+              <MetricLine label="月费" value={`${plan.monthly_price} ${plan.currency}`} />
+              <MetricLine label="试用天数" value={`${plan.trial_days} 天`} />
+              <MetricLine label="宽限天数" value={`${plan.grace_days} 天`} />
+              <MetricLine label="创建时间" value={formatDateTime(plan.created_at)} />
+              <MetricLine label="更新时间" value={formatDateTime(plan.updated_at)} />
+            </div>
             <PlatformPlanEditForm plan={plan} actionId={actionId} onRunAction={onRunAction} />
           </div>
         </div>
@@ -1278,6 +1304,11 @@ function PlatformPlanEditForm({
   const [trialDays, setTrialDays] = React.useState(String(plan.trial_days))
   const [graceDays, setGraceDays] = React.useState(String(plan.grace_days))
   const isBusy = actionId !== null
+  const draft: PlatformPlanDraft = { name, monthlyPrice, trialDays, graceDays }
+  const fieldErrors = validatePlatformPlanDraft(draft, { requireCode: false })
+  const formErrors = platformPlanFieldErrorList(fieldErrors)
+  const hasDraftChanges = hasPlatformPlanDraftChanges(plan, draft)
+  const canSubmit = !isBusy && hasDraftChanges && formErrors.length === 0
 
   React.useEffect(() => {
     setName(plan.name)
@@ -1288,16 +1319,16 @@ function PlatformPlanEditForm({
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (!canSubmit) {
+      return
+    }
     const payload: AdminWebPlatformSubscriptionPlanUpdatePayload = {
       name: name.trim(),
       monthly_price: monthlyPrice.trim(),
       currency: plan.currency,
-      trial_days: Number(trialDays),
-      grace_days: Number(graceDays),
+      trial_days: Number(trialDays.trim()),
+      grace_days: Number(graceDays.trim()),
       reason: "Admin Web 编辑套餐",
-    }
-    if (!payload.name || !isNonNegativeDecimalText(payload.monthly_price ?? "")) {
-      return
     }
     void onRunAction(`plan:update:${plan.code}`, `确认更新订阅计划 ${plan.name}？`, async () => {
       const nextPlan = await updateAdminWebPlatformSubscriptionPlan(plan.code, payload)
@@ -1306,15 +1337,26 @@ function PlatformPlanEditForm({
   }
 
   return (
-    <form className="grid gap-2 md:grid-cols-[minmax(0,1fr)_7rem_6rem_6rem_auto]" onSubmit={handleSubmit}>
-      <Input value={name} placeholder="计划名称" aria-label={`${plan.code} 计划名称`} disabled={isBusy} onChange={(event) => setName(event.target.value)} />
-      <Input value={monthlyPrice} inputMode="decimal" placeholder="月费" aria-label={`${plan.code} 月费`} disabled={isBusy} onChange={(event) => setMonthlyPrice(event.target.value)} />
-      <Input value={trialDays} inputMode="numeric" placeholder="试用" aria-label={`${plan.code} 试用天数`} disabled={isBusy} onChange={(event) => setTrialDays(event.target.value)} />
-      <Input value={graceDays} inputMode="numeric" placeholder="宽限" aria-label={`${plan.code} 宽限天数`} disabled={isBusy} onChange={(event) => setGraceDays(event.target.value)} />
-      <Button type="submit" size="sm" variant="outline" disabled={isBusy || !name.trim() || !monthlyPrice.trim()}>
-        {actionId === `plan:update:${plan.code}` ? "保存中" : "保存"}
-      </Button>
-    </form>
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={hasDraftChanges ? "secondary" : "outline"}>
+          {hasDraftChanges ? "有未保存变更" : "无未保存变更"}
+        </Badge>
+        <span className="text-xs text-muted-foreground">代码只读，编辑仅修改名称、月费和周期参数。</span>
+      </div>
+      {hasDraftChanges && formErrors.length > 0 ? (
+        <p className="text-xs text-destructive">{formErrors.join("；")}</p>
+      ) : null}
+      <form className="grid gap-2 md:grid-cols-[minmax(0,1fr)_7rem_6rem_6rem_auto]" onSubmit={handleSubmit}>
+        <Input value={name} placeholder="计划名称" aria-label={`${plan.code} 计划名称`} aria-invalid={hasDraftChanges && Boolean(fieldErrors.name)} disabled={isBusy} onChange={(event) => setName(event.target.value)} />
+        <Input value={monthlyPrice} inputMode="decimal" placeholder="月费" aria-label={`${plan.code} 月费`} aria-invalid={hasDraftChanges && Boolean(fieldErrors.monthlyPrice)} disabled={isBusy} onChange={(event) => setMonthlyPrice(event.target.value)} />
+        <Input value={trialDays} inputMode="numeric" placeholder="试用" aria-label={`${plan.code} 试用天数`} aria-invalid={hasDraftChanges && Boolean(fieldErrors.trialDays)} disabled={isBusy} onChange={(event) => setTrialDays(event.target.value)} />
+        <Input value={graceDays} inputMode="numeric" placeholder="宽限" aria-label={`${plan.code} 宽限天数`} aria-invalid={hasDraftChanges && Boolean(fieldErrors.graceDays)} disabled={isBusy} onChange={(event) => setGraceDays(event.target.value)} />
+        <Button type="submit" size="sm" variant="outline" disabled={!canSubmit}>
+          {actionId === `plan:update:${plan.code}` ? "保存中" : "保存"}
+        </Button>
+      </form>
+    </div>
   )
 }
 
@@ -1331,43 +1373,70 @@ function PlatformPlanCreateForm({
   const [trialDays, setTrialDays] = React.useState("30")
   const [graceDays, setGraceDays] = React.useState("0")
   const isBusy = actionId !== null
+  const draft: PlatformPlanDraft = { code, name, monthlyPrice, trialDays, graceDays }
+  const fieldErrors = validatePlatformPlanDraft(draft, { requireCode: true })
+  const formErrors = platformPlanFieldErrorList(fieldErrors)
+  const hasDraft = Boolean(code.trim() || name.trim() || monthlyPrice.trim() || trialDays.trim() !== "30" || graceDays.trim() !== "0")
+  const canSubmit = !isBusy && formErrors.length === 0
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (!canSubmit) {
+      return
+    }
     const payload: AdminWebPlatformSubscriptionPlanCreatePayload = {
       code: code.trim(),
       name: name.trim(),
       monthly_price: monthlyPrice.trim(),
       currency: "USDT",
-      trial_days: Number(trialDays),
-      grace_days: Number(graceDays),
+      trial_days: Number(trialDays.trim()),
+      grace_days: Number(graceDays.trim()),
       enabled: true,
       reason: "Admin Web 创建套餐",
-    }
-    if (!payload.code || !payload.name || !isNonNegativeDecimalText(payload.monthly_price)) {
-      return
     }
     void onRunAction("plan:create", `确认创建订阅计划 ${payload.name}？`, async () => {
       const plan = await createAdminWebPlatformSubscriptionPlan(payload)
       setCode("")
       setName("")
       setMonthlyPrice("")
+      setTrialDays("30")
+      setGraceDays("0")
       return `${plan.name} 已创建。`
     })
   }
 
   return (
-    <form className="grid gap-2 rounded-md border p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_6rem_6rem_auto]" onSubmit={handleSubmit}>
-      <Input value={code} placeholder="计划代码" aria-label="计划代码" disabled={isBusy} onChange={(event) => setCode(event.target.value)} />
-      <Input value={name} placeholder="计划名称" aria-label="计划名称" disabled={isBusy} onChange={(event) => setName(event.target.value)} />
-      <Input value={monthlyPrice} inputMode="decimal" placeholder="月费" aria-label="月费" disabled={isBusy} onChange={(event) => setMonthlyPrice(event.target.value)} />
-      <Input value={trialDays} inputMode="numeric" placeholder="试用" aria-label="试用天数" disabled={isBusy} onChange={(event) => setTrialDays(event.target.value)} />
-      <Input value={graceDays} inputMode="numeric" placeholder="宽限" aria-label="宽限天数" disabled={isBusy} onChange={(event) => setGraceDays(event.target.value)} />
-      <Button type="submit" size="sm" disabled={isBusy || !code.trim() || !name.trim() || !monthlyPrice.trim()}>
-        {actionId === "plan:create" ? "创建中" : "创建"}
-      </Button>
-    </form>
+    <div className="flex flex-col gap-2 rounded-md border p-3">
+      <div className="flex flex-col gap-1">
+        <p className="text-sm font-medium">创建订阅计划</p>
+        <p className="text-xs text-muted-foreground">默认币种 USDT，创建后仍可单独停用。</p>
+      </div>
+      {hasDraft && formErrors.length > 0 ? (
+        <p className="text-xs text-destructive">{formErrors.join("；")}</p>
+      ) : (
+        <p className="text-xs text-muted-foreground">代码 1-64 位，名称 1-128 位，月费可为 0。</p>
+      )}
+      <form className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_6rem_6rem_auto]" onSubmit={handleSubmit}>
+        <Input value={code} placeholder="计划代码" aria-label="计划代码" aria-invalid={hasDraft && Boolean(fieldErrors.code)} disabled={isBusy} onChange={(event) => setCode(event.target.value)} />
+        <Input value={name} placeholder="计划名称" aria-label="计划名称" aria-invalid={hasDraft && Boolean(fieldErrors.name)} disabled={isBusy} onChange={(event) => setName(event.target.value)} />
+        <Input value={monthlyPrice} inputMode="decimal" placeholder="月费" aria-label="月费" aria-invalid={hasDraft && Boolean(fieldErrors.monthlyPrice)} disabled={isBusy} onChange={(event) => setMonthlyPrice(event.target.value)} />
+        <Input value={trialDays} inputMode="numeric" placeholder="试用" aria-label="试用天数" aria-invalid={hasDraft && Boolean(fieldErrors.trialDays)} disabled={isBusy} onChange={(event) => setTrialDays(event.target.value)} />
+        <Input value={graceDays} inputMode="numeric" placeholder="宽限" aria-label="宽限天数" aria-invalid={hasDraft && Boolean(fieldErrors.graceDays)} disabled={isBusy} onChange={(event) => setGraceDays(event.target.value)} />
+        <Button type="submit" size="sm" disabled={!canSubmit}>
+          {actionId === "plan:create" ? "创建中" : "创建"}
+        </Button>
+      </form>
+    </div>
   )
+}
+
+type PlatformWithdrawalReviewFieldKey = "rejectNote" | "completeNote" | "payoutReference" | "payoutProofUrl"
+type PlatformWithdrawalReviewErrors = Partial<Record<PlatformWithdrawalReviewFieldKey, string>>
+type PlatformWithdrawalReviewDraft = {
+  rejectNote: string
+  completeNote: string
+  payoutReference: string
+  payoutProofUrl: string
 }
 
 function PlatformWithdrawalsPanel({
@@ -1385,15 +1454,31 @@ function PlatformWithdrawalsPanel({
   const [detail, setDetail] = React.useState<AdminWebPlatformWithdrawal | null>(null)
   const [detailError, setDetailError] = React.useState<string | null>(null)
   const [isDetailLoading, setIsDetailLoading] = React.useState(false)
+  const [reviewDraft, setReviewDraft] = React.useState<PlatformWithdrawalReviewDraft>(() =>
+    createPlatformWithdrawalReviewDraft(),
+  )
+  const reviewErrors = validatePlatformWithdrawalReviewDraft(reviewDraft)
+  const completeReviewErrors = platformWithdrawalReviewErrorList(reviewErrors, [
+    "completeNote",
+    "payoutReference",
+    "payoutProofUrl",
+  ])
+  const rejectNoteTouched = reviewDraft.rejectNote.length > 0
+  const rejectReviewErrors = platformWithdrawalRejectErrorList(reviewDraft, reviewErrors)
+  const pendingWithdrawalCount = withdrawals.filter(isPlatformWithdrawalPending).length
 
   const loadDetail = async (withdrawalId: number) => {
     if (expandedWithdrawalId === withdrawalId) {
       setExpandedWithdrawalId(null)
+      setDetail(null)
+      setDetailError(null)
+      setReviewDraft(createPlatformWithdrawalReviewDraft())
       return
     }
     setExpandedWithdrawalId(withdrawalId)
     setDetail(null)
     setDetailError(null)
+    setReviewDraft(createPlatformWithdrawalReviewDraft())
     setIsDetailLoading(true)
     try {
       setDetail(await getAdminWebPlatformWithdrawal(withdrawalId))
@@ -1406,108 +1491,209 @@ function PlatformWithdrawalsPanel({
 
   return (
     <section className="flex flex-col gap-3 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium">提现审核</p>
-        <Badge variant="outline">{withdrawals.length}</Badge>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">提现审核</p>
+          <p className="mt-1 text-xs text-muted-foreground">仅处理本地审核状态，不执行真实打款或链上查询。</p>
+        </div>
+        <Badge variant="outline">{pendingWithdrawalCount} / {withdrawals.length} 待审</Badge>
       </div>
       {withdrawals.length === 0 ? <StatusBlock title="暂无待审提现" detail="当前没有待审核提现申请。" /> : null}
-      {withdrawals.slice(0, 5).map((withdrawal) => (
-        <div key={withdrawal.withdrawal_id} className="rounded-md border p-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-sm font-medium">{withdrawal.amount} {withdrawal.currency}</p>
-                <Badge variant="outline">{withdrawalStatusLabel(withdrawal.status)}</Badge>
+      {withdrawals.slice(0, 5).map((withdrawal) => {
+        const isExpanded = expandedWithdrawalId === withdrawal.withdrawal_id
+        const currentWithdrawal =
+          isExpanded && detail?.withdrawal_id === withdrawal.withdrawal_id ? detail : withdrawal
+        const canReview = isPlatformWithdrawalPending(currentWithdrawal)
+        const isRejecting = actionId === `withdrawal:reject:${withdrawal.withdrawal_id}`
+        const isCompleting = actionId === `withdrawal:complete:${withdrawal.withdrawal_id}`
+        const canReject =
+          canReview && actionId === null && rejectReviewErrors.length === 0 && Boolean(reviewDraft.rejectNote.trim())
+        const canComplete = canReview && actionId === null && completeReviewErrors.length === 0
+
+        return (
+          <div key={withdrawal.withdrawal_id} className="rounded-md border p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-sm font-medium">{withdrawal.amount} {withdrawal.currency}</p>
+                  <Badge variant={withdrawal.status === "pending" ? "secondary" : "outline"}>
+                    {withdrawalStatusLabel(withdrawal.status)}
+                  </Badge>
+                </div>
+                <p className="mt-1 truncate text-xs text-muted-foreground">
+                  {withdrawal.store_name ?? "未知店铺"} · {withdrawal.network} · {withdrawal.address_masked}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">{formatDateTime(withdrawal.requested_at)}</p>
               </div>
-              <p className="mt-1 truncate text-xs text-muted-foreground">
-                {withdrawal.store_name ?? "未知店铺"} · {withdrawal.network} · {withdrawal.address_masked}
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">{formatDateTime(withdrawal.requested_at)}</p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant={isExpanded ? "secondary" : "outline"}
+                  disabled={isDetailLoading || actionId !== null}
+                  onClick={() => {
+                    void loadDetail(withdrawal.withdrawal_id)
+                  }}
+                >
+                  {isExpanded ? "收起" : "详情"}
+                </Button>
+              </div>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={isDetailLoading || actionId !== null}
-                onClick={() => {
-                  void loadDetail(withdrawal.withdrawal_id)
-                }}
-              >
-                {expandedWithdrawalId === withdrawal.withdrawal_id ? "收起" : "详情"}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={actionId !== null}
-                onClick={() =>
-                  onRunAction(
-                    `withdrawal:reject:${withdrawal.withdrawal_id}`,
-                    `确认拒绝 ${withdrawal.amount} ${withdrawal.currency} 提现？`,
-                    async () => {
-                      const result = await rejectAdminWebPlatformWithdrawal(withdrawal.withdrawal_id, {
-                        admin_note: "Admin Web 拒绝",
-                      })
-                      await onRefresh()
-                      return `提现 ${result.withdrawal_id} 已拒绝。`
-                    },
-                  )
-                }
-              >
-                拒绝
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                disabled={actionId !== null}
-                onClick={() =>
-                  onRunAction(
-                    `withdrawal:complete:${withdrawal.withdrawal_id}`,
-                    `确认标记 ${withdrawal.amount} ${withdrawal.currency} 提现为已完成？`,
-                    async () => {
-                      const result = await completeAdminWebPlatformWithdrawal(withdrawal.withdrawal_id, {
-                        admin_note: "Admin Web 人工确认",
-                      })
-                      await onRefresh()
-                      return `提现 ${result.withdrawal_id} 已完成。`
-                    },
-                  )
-                }
-              >
-                完成
-              </Button>
-            </div>
+            {isExpanded ? (
+              <div className="mt-3 flex flex-col gap-3 rounded-md border p-3">
+                {isDetailLoading ? (
+                  <p className="text-xs text-muted-foreground">正在加载提现详情</p>
+                ) : null}
+                {detailError ? (
+                  <div className="flex flex-col gap-1">
+                    <p className="text-sm font-medium">提现详情加载失败</p>
+                    <p className="text-xs text-muted-foreground">{detailError}</p>
+                  </div>
+                ) : null}
+                {detail && !isDetailLoading ? (
+                  <>
+                    <div className="flex flex-col gap-2">
+                      <div className="flex flex-col gap-1">
+                        <p className="text-sm font-medium">安全摘要</p>
+                        <p className="text-xs text-muted-foreground">
+                          只显示脱敏地址和状态时间，不回显付款参考、凭证 URL 或审核备注。
+                        </p>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <MetricLine label="提现编号" value={String(detail.withdrawal_id)} />
+                        <MetricLine label="店铺" value={detail.store_name ?? detail.tenant_public_id ?? "-"} />
+                        <MetricLine label="金额" value={`${detail.amount} ${detail.currency}`} />
+                        <MetricLine label="网络" value={detail.network} />
+                        <MetricLine label="地址" value={detail.address_masked} />
+                        <MetricLine label="状态" value={withdrawalStatusLabel(detail.status)} />
+                        <MetricLine label="申请时间" value={formatDateTime(detail.requested_at)} />
+                        <MetricLine label="审核时间" value={formatDateTime(detail.reviewed_at)} />
+                        <MetricLine label="完成时间" value={formatDateTime(detail.completed_at)} />
+                      </div>
+                    </div>
+                    <Separator />
+                    {canReview ? (
+                      <div className="flex flex-col gap-3">
+                        <div className="flex flex-col gap-1">
+                          <p className="text-sm font-medium">审核操作</p>
+                          <p className="text-xs text-muted-foreground">
+                            完成仅标记本地提现状态；真实打款、链上确认和凭证核验需在线下完成。
+                          </p>
+                        </div>
+                        {rejectNoteTouched && rejectReviewErrors.length > 0 ? (
+                          <p className="text-xs text-destructive">{rejectReviewErrors.join("；")}</p>
+                        ) : null}
+                        {completeReviewErrors.length > 0 ? (
+                          <p className="text-xs text-destructive">{completeReviewErrors.join("；")}</p>
+                        ) : null}
+                        <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                          <Input
+                            value={reviewDraft.rejectNote}
+                            placeholder="拒绝备注，必填"
+                            aria-label="拒绝提现审核备注"
+                            aria-invalid={rejectNoteTouched && Boolean(reviewErrors.rejectNote)}
+                            disabled={actionId !== null}
+                            onChange={(event) =>
+                              setReviewDraft((current) => ({ ...current, rejectNote: event.target.value }))
+                            }
+                          />
+                          <Input
+                            value={reviewDraft.completeNote}
+                            placeholder="完成备注，可选"
+                            aria-label="完成提现审核备注"
+                            aria-invalid={Boolean(reviewErrors.completeNote)}
+                            disabled={actionId !== null}
+                            onChange={(event) =>
+                              setReviewDraft((current) => ({ ...current, completeNote: event.target.value }))
+                            }
+                          />
+                          <Input
+                            value={reviewDraft.payoutReference}
+                            placeholder="付款参考，可选"
+                            aria-label="付款参考"
+                            aria-invalid={Boolean(reviewErrors.payoutReference)}
+                            disabled={actionId !== null}
+                            onChange={(event) =>
+                              setReviewDraft((current) => ({ ...current, payoutReference: event.target.value }))
+                            }
+                          />
+                          <Input
+                            value={reviewDraft.payoutProofUrl}
+                            placeholder="凭证 URL，可选"
+                            aria-label="付款凭证 URL"
+                            aria-invalid={Boolean(reviewErrors.payoutProofUrl)}
+                            disabled={actionId !== null}
+                            onChange={(event) =>
+                              setReviewDraft((current) => ({ ...current, payoutProofUrl: event.target.value }))
+                            }
+                          />
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!canReject}
+                            onClick={() =>
+                              onRunAction(
+                                `withdrawal:reject:${withdrawal.withdrawal_id}`,
+                                `确认拒绝 ${withdrawal.amount} ${withdrawal.currency} 提现？`,
+                                async () => {
+                                  const result = await rejectAdminWebPlatformWithdrawal(withdrawal.withdrawal_id, {
+                                    admin_note: reviewDraft.rejectNote.trim(),
+                                  })
+                                  await onRefresh()
+                                  setExpandedWithdrawalId(null)
+                                  setDetail(null)
+                                  setReviewDraft(createPlatformWithdrawalReviewDraft())
+                                  return `提现 ${result.withdrawal_id} 已拒绝。`
+                                },
+                              )
+                            }
+                          >
+                            {isRejecting ? "拒绝中" : "拒绝"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={!canComplete}
+                            onClick={() =>
+                              onRunAction(
+                                `withdrawal:complete:${withdrawal.withdrawal_id}`,
+                                `确认标记 ${withdrawal.amount} ${withdrawal.currency} 提现为已完成？`,
+                                async () => {
+                                  const result = await completeAdminWebPlatformWithdrawal(withdrawal.withdrawal_id, {
+                                    admin_note: reviewDraft.completeNote.trim() || "Admin Web 人工确认",
+                                    payout_reference: reviewDraft.payoutReference.trim() || undefined,
+                                    payout_proof_url: reviewDraft.payoutProofUrl.trim() || undefined,
+                                  })
+                                  await onRefresh()
+                                  setExpandedWithdrawalId(null)
+                                  setDetail(null)
+                                  setReviewDraft(createPlatformWithdrawalReviewDraft())
+                                  return `提现 ${result.withdrawal_id} 已完成。`
+                                },
+                              )
+                            }
+                          >
+                            {isCompleting ? "完成中" : "标记完成"}
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">该提现不是待审核状态，仅展示安全摘要。</p>
+                    )}
+                  </>
+                ) : null}
+              </div>
+            ) : null}
           </div>
-          {expandedWithdrawalId === withdrawal.withdrawal_id ? (
-            <div className="mt-3 rounded-md border p-3">
-              {isDetailLoading ? (
-                <p className="text-xs text-muted-foreground">正在加载提现详情</p>
-              ) : null}
-              {detailError ? (
-                <div className="flex flex-col gap-1">
-                  <p className="text-sm font-medium">提现详情加载失败</p>
-                  <p className="text-xs text-muted-foreground">{detailError}</p>
-                </div>
-              ) : null}
-              {detail && !isDetailLoading ? (
-                <div className="flex flex-col gap-2">
-                  <MetricLine label="提现编号" value={String(detail.withdrawal_id)} />
-                  <MetricLine label="店铺" value={detail.store_name ?? detail.tenant_public_id ?? "-"} />
-                  <MetricLine label="金额" value={`${detail.amount} ${detail.currency}`} />
-                  <MetricLine label="网络" value={detail.network} />
-                  <MetricLine label="地址" value={detail.address_masked} />
-                  <MetricLine label="状态" value={withdrawalStatusLabel(detail.status)} />
-                  <MetricLine label="申请时间" value={formatDateTime(detail.requested_at)} />
-                  <MetricLine label="审核时间" value={formatDateTime(detail.reviewed_at)} />
-                  <MetricLine label="完成时间" value={formatDateTime(detail.completed_at)} />
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      ))}
+        )
+      })}
     </section>
   )
 }
+
+type PlatformRiskAuditActionFilter = "all" | "user" | "tenant" | "supply" | "order" | "dispute"
+type PlatformRiskAuditStatusFilter = "all" | "banned" | "active" | "suspended" | "grace" | "disabled" | "other"
 
 function PlatformRiskPanel({
   bannedUsers,
@@ -1520,13 +1706,37 @@ function PlatformRiskPanel({
   actionId: string | null
   onRunAction: PlatformActionRunner
 }) {
+  const [auditQuery, setAuditQuery] = React.useState("")
+  const [auditAction, setAuditAction] = React.useState<PlatformRiskAuditActionFilter>("all")
+  const [auditStatus, setAuditStatus] = React.useState<PlatformRiskAuditStatusFilter>("all")
+  const hasAuditFilters = auditQuery.trim().length > 0 || auditAction !== "all" || auditStatus !== "all"
+  const filteredAuditLogs = React.useMemo(
+    () =>
+      auditLogs.filter((log) => {
+        if (!platformRiskAuditActionMatches(log.action, auditAction)) {
+          return false
+        }
+        if (!platformRiskAuditStatusMatches(log.new_status, auditStatus)) {
+          return false
+        }
+        const normalizedQuery = auditQuery.trim().toLowerCase()
+        if (!normalizedQuery) {
+          return true
+        }
+        return platformRiskAuditSearchText(log).includes(normalizedQuery)
+      }),
+    [auditAction, auditLogs, auditQuery, auditStatus],
+  )
+  const displayedAuditLogs = filteredAuditLogs.slice(0, 8)
+
   return (
     <section className="flex flex-col gap-3 rounded-md border p-3">
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm font-medium">平台风控</p>
-        <Badge variant="outline">{bannedUsers.length}</Badge>
+        <Badge variant="outline">{bannedUsers.length} 人</Badge>
       </div>
       <PlatformUserBanForm actionId={actionId} onRunAction={onRunAction} />
+      {bannedUsers.length === 0 ? <StatusBlock title="暂无封禁用户" detail="当前没有平台封禁中的 Telegram 用户。" /> : null}
       {bannedUsers.slice(0, 4).map((user) => (
         <div key={user.telegram_user_id} className="rounded-md border p-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1561,17 +1771,100 @@ function PlatformRiskPanel({
       ))}
       <Separator />
       <div className="flex flex-col gap-2">
-        <p className="text-sm font-medium">审计日志</p>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm font-medium">审计日志</p>
+            <p className="mt-1 text-xs text-muted-foreground">只读安全摘要，不展示内部 ID、raw payload 或凭据。</p>
+          </div>
+          <Badge variant="outline">{filteredAuditLogs.length} / {auditLogs.length}</Badge>
+        </div>
+        <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_10rem_10rem_auto]">
+          <Input
+            value={auditQuery}
+            placeholder="搜索动作/对象/TG/原因"
+            aria-label="搜索平台风控审计日志"
+            onChange={(event) => setAuditQuery(event.target.value)}
+          />
+          <Select value={auditAction} onValueChange={(value) => setAuditAction(value as PlatformRiskAuditActionFilter)}>
+            <SelectTrigger aria-label="审计动作筛选">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectLabel>动作范围</SelectLabel>
+                <SelectItem value="all">全部动作</SelectItem>
+                <SelectItem value="user">用户风控</SelectItem>
+                <SelectItem value="tenant">租户风控</SelectItem>
+                <SelectItem value="supply">供货管控</SelectItem>
+                <SelectItem value="order">订单拦截</SelectItem>
+                <SelectItem value="dispute">售后/争议</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Select value={auditStatus} onValueChange={(value) => setAuditStatus(value as PlatformRiskAuditStatusFilter)}>
+            <SelectTrigger aria-label="审计状态筛选">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectLabel>状态</SelectLabel>
+                <SelectItem value="all">全部状态</SelectItem>
+                <SelectItem value="banned">已封禁</SelectItem>
+                <SelectItem value="active">已恢复</SelectItem>
+                <SelectItem value="suspended">已冻结</SelectItem>
+                <SelectItem value="grace">宽限</SelectItem>
+                <SelectItem value="disabled">已停用</SelectItem>
+                <SelectItem value="other">其他状态</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!hasAuditFilters}
+            onClick={() => {
+              setAuditQuery("")
+              setAuditAction("all")
+              setAuditStatus("all")
+            }}
+          >
+            重置
+          </Button>
+        </div>
         {auditLogs.length === 0 ? <StatusBlock title="暂无风控审计" detail="最近没有平台风控记录。" /> : null}
-        {auditLogs.slice(0, 5).map((log, index) => (
-          <div key={`${log.created_at}:${index}`} className="rounded-md border p-2">
-            <div className="flex items-center justify-between gap-3">
-              <span className="truncate text-sm font-medium">{log.action}</span>
-              <Badge variant="outline">{log.new_status ?? "-"}</Badge>
+        {auditLogs.length > 0 && displayedAuditLogs.length === 0 ? (
+          <StatusBlock title="没有匹配记录" detail="调整动作、状态或关键词后再查看审计日志。" />
+        ) : null}
+        {displayedAuditLogs.map((log, index) => (
+          <div key={`${log.created_at}:${index}`} className="rounded-md border p-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">{platformRiskAuditActionLabel(log.action)}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{formatDateTime(log.created_at)}</p>
+              </div>
+              <Badge variant={platformRiskAuditStatusBadgeVariant(log.new_status)}>
+                {platformRiskAuditStatusLabel(log.new_status)}
+              </Badge>
             </div>
-            <p className="mt-1 truncate text-xs text-muted-foreground">
-              {formatDateTime(log.created_at)} · {log.reason ?? log.risk_rule ?? "无备注"}
-            </p>
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              <span>对象 {platformRiskAuditTargetLabel(log.target_type)}</span>
+              <span>操作者 {platformRiskAuditActorLabel(log)}</span>
+              {log.target_telegram_user_id ? <span>目标 TG {log.target_telegram_user_id}</span> : null}
+              {log.previous_status || log.new_status ? (
+                <span>
+                  状态 {platformRiskAuditStatusLabel(log.previous_status)}{" -> "}
+                  {platformRiskAuditStatusLabel(log.new_status)}
+                </span>
+              ) : null}
+              {log.blocked_count !== null && log.blocked_count !== undefined ? <span>拦截 {log.blocked_count}</span> : null}
+              {log.threshold !== null && log.threshold !== undefined ? <span>阈值 {log.threshold}</span> : null}
+              {log.window_seconds !== null && log.window_seconds !== undefined ? <span>窗口 {log.window_seconds}s</span> : null}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">{log.reason ?? "无备注"}</p>
+            {log.risk_rule && log.risk_rule !== log.reason ? (
+              <p className="mt-1 text-xs text-muted-foreground">规则 {log.risk_rule}</p>
+            ) : null}
           </div>
         ))}
       </div>
@@ -1622,6 +1915,10 @@ function PlatformUserBanForm({
   )
 }
 
+type PlatformSupplierOfferStatusFilter = "all" | "on" | "disabled"
+type PlatformSupplierOfferApprovalFilter = "all" | "approval_required" | "open"
+type PlatformSupplierOfferStockFilter = "all" | "available" | "empty"
+
 function PlatformSupplyControlPanel({
   offers,
   actionId,
@@ -1631,14 +1928,122 @@ function PlatformSupplyControlPanel({
   actionId: string | null
   onRunAction: PlatformActionRunner
 }) {
+  const [offerQuery, setOfferQuery] = React.useState("")
+  const [statusFilter, setStatusFilter] = React.useState<PlatformSupplierOfferStatusFilter>("all")
+  const [approvalFilter, setApprovalFilter] = React.useState<PlatformSupplierOfferApprovalFilter>("all")
+  const [stockFilter, setStockFilter] = React.useState<PlatformSupplierOfferStockFilter>("all")
+  const [actionReason, setActionReason] = React.useState("")
+  const actionReasonError = platformSupplierOfferActionReasonError(actionReason)
+  const hasFilters =
+    offerQuery.trim().length > 0 || statusFilter !== "all" || approvalFilter !== "all" || stockFilter !== "all"
+  const filteredOffers = React.useMemo(
+    () =>
+      offers.filter(
+        (offer) =>
+          platformSupplierOfferMatchesQuery(offer, offerQuery) &&
+          platformSupplierOfferMatchesStatus(offer, statusFilter) &&
+          platformSupplierOfferMatchesApproval(offer, approvalFilter) &&
+          platformSupplierOfferMatchesStock(offer, stockFilter),
+      ),
+    [approvalFilter, offerQuery, offers, statusFilter, stockFilter],
+  )
+  const displayedOffers = filteredOffers.slice(0, 8)
+  const enabledOfferCount = offers.filter((offer) => offer.status !== "disabled").length
+  const disabledOfferCount = offers.filter((offer) => offer.status === "disabled").length
+  const approvalRequiredCount = offers.filter((offer) => offer.requires_approval).length
+  const isActionDisabled = actionId !== null || Boolean(actionReasonError)
+
   return (
     <section className="flex flex-col gap-3 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium">平台供货管控</p>
-        <Badge variant="outline">{offers.length}</Badge>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">平台供货管控</p>
+          <p className="mt-1 text-xs text-muted-foreground">只做供货商品软下架和恢复，不删除数据或触发真实分账。</p>
+        </div>
+        <Badge variant="outline">{filteredOffers.length} / {offers.length}</Badge>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        <MetricLine label="可供货" value={String(enabledOfferCount)} />
+        <MetricLine label="已软下架" value={String(disabledOfferCount)} />
+        <MetricLine label="需审批" value={String(approvalRequiredCount)} />
+      </div>
+      <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_10rem_10rem_10rem_auto]">
+        <Input
+          value={offerQuery}
+          placeholder="搜索商品/供应商/发货"
+          aria-label="搜索平台供货商品"
+          onChange={(event) => setOfferQuery(event.target.value)}
+        />
+        <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as PlatformSupplierOfferStatusFilter)}>
+          <SelectTrigger aria-label="供货商品状态筛选">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectLabel>状态</SelectLabel>
+              <SelectItem value="all">全部状态</SelectItem>
+              <SelectItem value="on">可供货</SelectItem>
+              <SelectItem value="disabled">已软下架</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+        <Select value={approvalFilter} onValueChange={(value) => setApprovalFilter(value as PlatformSupplierOfferApprovalFilter)}>
+          <SelectTrigger aria-label="供货审批方式筛选">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectLabel>审批方式</SelectLabel>
+              <SelectItem value="all">全部方式</SelectItem>
+              <SelectItem value="approval_required">需审批</SelectItem>
+              <SelectItem value="open">免审批</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+        <Select value={stockFilter} onValueChange={(value) => setStockFilter(value as PlatformSupplierOfferStockFilter)}>
+          <SelectTrigger aria-label="供货库存筛选">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectLabel>库存</SelectLabel>
+              <SelectItem value="all">全部库存</SelectItem>
+              <SelectItem value="available">有库存</SelectItem>
+              <SelectItem value="empty">无库存</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={!hasFilters}
+          onClick={() => {
+            setOfferQuery("")
+            setStatusFilter("all")
+            setApprovalFilter("all")
+            setStockFilter("all")
+          }}
+        >
+          重置
+        </Button>
+      </div>
+      <div className="flex flex-col gap-2">
+        <Input
+          value={actionReason}
+          placeholder="操作原因，可选，最多 255 字"
+          aria-label="平台供货商品状态操作原因"
+          aria-invalid={Boolean(actionReasonError)}
+          disabled={actionId !== null}
+          onChange={(event) => setActionReason(event.target.value)}
+        />
+        {actionReasonError ? <p className="text-xs text-destructive">{actionReasonError}</p> : null}
       </div>
       {offers.length === 0 ? <StatusBlock title="暂无供货商品" detail="当前没有平台可管控供货商品。" /> : null}
-      {offers.slice(0, 6).map((offer) => {
+      {offers.length > 0 && displayedOffers.length === 0 ? (
+        <StatusBlock title="没有匹配商品" detail="调整关键词、状态、审批方式或库存筛选后再查看供货商品。" />
+      ) : null}
+      {displayedOffers.map((offer) => {
         const nextStatus = offer.status === "disabled" ? "on" : "disabled"
         return (
           <div key={offer.supplier_offer_id} className="rounded-md border p-3">
@@ -1649,15 +2054,22 @@ function PlatformSupplyControlPanel({
                   <Badge variant={offer.status === "disabled" ? "destructive" : "secondary"}>
                     {supplierOfferStatusLabel(offer.status)}
                   </Badge>
+                  <Badge variant="outline">{platformSupplierOfferApprovalLabel(offer)}</Badge>
                 </div>
                 <p className="mt-1 truncate text-xs text-muted-foreground">
                   {offer.supplier_store_name} · {deliveryTypeLabel(offer.delivery_type)} · 库存 {offer.available_count}
                 </p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <MetricLine label="建议价" value={`${offer.suggested_price} ${offer.currency}`} />
+                  <MetricLine label="最低价" value={offer.min_sale_price ? `${offer.min_sale_price} ${offer.currency}` : "-"} />
+                  <MetricLine label="供货成本" value={`${offer.supplier_cost} ${offer.currency}`} />
+                  <MetricLine label="更新" value={formatDateTime(offer.updated_at)} />
+                </div>
               </div>
               <Button
                 size="sm"
                 variant={nextStatus === "disabled" ? "destructive" : "outline"}
-                disabled={actionId !== null}
+                disabled={isActionDisabled}
                 onClick={() =>
                   onRunAction(
                     `supply:${nextStatus}:${offer.supplier_offer_id}`,
@@ -1665,8 +2077,9 @@ function PlatformSupplyControlPanel({
                     async () => {
                       const result = await updateAdminWebPlatformSupplierOfferStatus(offer.supplier_offer_id, {
                         status: nextStatus,
-                        reason: "Admin Web 平台供货管控",
+                        reason: actionReason.trim() || "Admin Web 平台供货管控",
                       })
+                      setActionReason("")
                       return `${result.product_name} 已${result.status === "disabled" ? "软下架" : "恢复"}。`
                     },
                   )
@@ -1769,6 +2182,7 @@ function CloneBotPanel({
     React.useState<AdminWebTenantOrderObservability | null>(null)
   const [orderObservabilityLoading, setOrderObservabilityLoading] = React.useState(false)
   const [orderObservabilityError, setOrderObservabilityError] = React.useState<string | null>(null)
+  const [orderObservabilityOutTradeNo, setOrderObservabilityOutTradeNo] = React.useState<string | null>(null)
   const [isLoading, setIsLoading] = React.useState(false)
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null)
 
@@ -1835,6 +2249,7 @@ function CloneBotPanel({
       setOrderObservability(null)
       setOrderObservabilityLoading(false)
       setOrderObservabilityError(null)
+      setOrderObservabilityOutTradeNo(null)
       setErrorMessage(null)
       return
     }
@@ -1842,6 +2257,8 @@ function CloneBotPanel({
     setIsLoading(true)
     setErrorMessage(null)
     try {
+      const nextOrderObservabilityOutTradeNo =
+        normalizedOrderObservationTradeNo(orderFilters.out_trade_no) ?? null
       const [nextOverview, nextStoreSettings, nextProducts, nextOrders, nextOrderObservability] = await Promise.all([
         getAdminWebTenantOverview(),
         getAdminWebTenantStoreSettings(),
@@ -1849,7 +2266,7 @@ function CloneBotPanel({
         getAdminWebTenantOrders(orderFilters),
         getAdminWebTenantOrderObservability({
           limit: 8,
-          out_trade_no: normalizedOrderObservationTradeNo(orderFilters.out_trade_no),
+          out_trade_no: nextOrderObservabilityOutTradeNo ?? undefined,
         }),
       ])
       const [nextPaymentConfigs, nextSubscriptionDashboard, nextFinanceDashboard, nextSupplyDashboard] = await Promise.all([
@@ -1864,6 +2281,7 @@ function CloneBotPanel({
       setOrders(nextOrders)
       setOrderObservability(nextOrderObservability)
       setOrderObservabilityError(null)
+      setOrderObservabilityOutTradeNo(nextOrderObservabilityOutTradeNo)
       setPaymentConfigs(nextPaymentConfigs)
       setSubscriptionDashboard(nextSubscriptionDashboard)
       setFinanceDashboard(nextFinanceDashboard)
@@ -1892,6 +2310,7 @@ function CloneBotPanel({
       setSelectedOrderDiagnostics(null)
       setOrderObservability(null)
       setOrderObservabilityError(errorToMessage(error))
+      setOrderObservabilityOutTradeNo(null)
       setSubscriptionFinanceError(errorToMessage(error))
       setErrorMessage(errorToMessage(error))
     } finally {
@@ -1931,6 +2350,7 @@ function CloneBotPanel({
       setOrderObservability(null)
       setOrderObservabilityLoading(false)
       setOrderObservabilityError(null)
+      setOrderObservabilityOutTradeNo(null)
       return
     }
 
@@ -1940,7 +2360,7 @@ function CloneBotPanel({
       setOrderObservability(
         await getAdminWebTenantOrderObservability({
           limit: 8,
-          out_trade_no: normalizedOrderObservationTradeNo(orderFilters.out_trade_no),
+          out_trade_no: orderObservabilityOutTradeNo ?? undefined,
         }),
       )
     } catch (error) {
@@ -1949,7 +2369,37 @@ function CloneBotPanel({
     } finally {
       setOrderObservabilityLoading(false)
     }
-  }, [isTenantWorkspace, currentWorkspace?.workspace_id, orderFilters.out_trade_no])
+  }, [isTenantWorkspace, currentWorkspace?.workspace_id, orderObservabilityOutTradeNo])
+
+  const loadTenantOrderObservabilityForTradeNo = React.useCallback(
+    async (outTradeNo: string | null) => {
+      if (!isTenantWorkspace) {
+        setOrderObservability(null)
+        setOrderObservabilityLoading(false)
+        setOrderObservabilityError(null)
+        setOrderObservabilityOutTradeNo(null)
+        return
+      }
+
+      setOrderObservabilityOutTradeNo(outTradeNo)
+      setOrderObservabilityLoading(true)
+      setOrderObservabilityError(null)
+      try {
+        setOrderObservability(
+          await getAdminWebTenantOrderObservability({
+            limit: 8,
+            out_trade_no: outTradeNo ?? undefined,
+          }),
+        )
+      } catch (error) {
+        setOrderObservability(null)
+        setOrderObservabilityError(errorToMessage(error))
+      } finally {
+        setOrderObservabilityLoading(false)
+      }
+    },
+    [isTenantWorkspace, currentWorkspace?.workspace_id],
+  )
 
   const loadTenantAuditLogs = React.useCallback(async () => {
     if (!isTenantWorkspace) {
@@ -2134,6 +2584,7 @@ function CloneBotPanel({
     setOrderObservability(null)
     setOrderObservabilityLoading(false)
     setOrderObservabilityError(null)
+    setOrderObservabilityOutTradeNo(null)
   }, [currentWorkspace?.workspace_id])
 
   React.useEffect(() => {
@@ -2878,6 +3329,17 @@ function CloneBotPanel({
     }
   }, [])
 
+  const handleLoadOrderObservabilityForOrder = React.useCallback(
+    (order: AdminWebTenantOrder) => {
+      void loadTenantOrderObservabilityForTradeNo(order.out_trade_no)
+    },
+    [loadTenantOrderObservabilityForTradeNo],
+  )
+
+  const handleClearOrderObservabilityScope = React.useCallback(() => {
+    void loadTenantOrderObservabilityForTradeNo(null)
+  }, [loadTenantOrderObservabilityForTradeNo])
+
   const handleCreateResellerProduct = React.useCallback(
     async (payload: AdminWebCreateResellerProductPayload) => {
       const salePrice = payload.sale_price.trim()
@@ -3112,10 +3574,12 @@ function CloneBotPanel({
   }, [])
 
   const handleApplyOrderFilters = React.useCallback((filters: AdminWebTenantOrderFilters) => {
+    const normalizedFilters = normalizeTenantOrderFilters(filters)
     setOrderDiagnosticsError(null)
     setOrderObservabilityError(null)
+    setOrderObservabilityOutTradeNo(normalizedOrderObservationTradeNo(normalizedFilters.out_trade_no) ?? null)
     setSelectedOrderDiagnostics(null)
-    setOrderFilters(normalizeTenantOrderFilters(filters))
+    setOrderFilters(normalizedFilters)
   }, [])
 
   const handleProductPageChange = React.useCallback((offset: number) => {
@@ -3189,6 +3653,7 @@ function CloneBotPanel({
               orderObservability={orderObservability}
               orderObservabilityLoading={orderObservabilityLoading}
               orderObservabilityError={orderObservabilityError}
+              orderObservabilityOutTradeNo={orderObservabilityOutTradeNo}
               onCreateProduct={handleCreateProduct}
               onUpdateProductMetadata={handleUpdateProductMetadata}
               onUpdateProductSales={handleUpdateProductSales}
@@ -3196,11 +3661,13 @@ function CloneBotPanel({
               onImportProductInventory={handleImportProductInventory}
               onUploadProductDeliveryFile={handleUploadProductDeliveryFile}
               onLoadOrderDiagnostics={handleLoadOrderDiagnostics}
+              onLoadOrderObservabilityForOrder={handleLoadOrderObservabilityForOrder}
               onApplyProductFilters={handleApplyProductFilters}
               onApplyOrderFilters={handleApplyOrderFilters}
               onProductPageChange={handleProductPageChange}
               onOrderPageChange={handleOrderPageChange}
               onRefreshOrderObservability={loadTenantOrderObservability}
+              onClearOrderObservabilityScope={handleClearOrderObservabilityScope}
               onRefresh={loadTenantWorkspace}
             />
           ) : null}
@@ -4814,31 +5281,54 @@ function CloneBotPaymentSettingsPanel({
   const epusdtConfig = configs.find((config) => config.provider === "epusdt_gmpay")
   const epayConfig = configs.find((config) => config.provider === "epay_compatible")
 
-  if (!epusdtConfig || !epayConfig) {
-    return null
-  }
-
   return (
     <div className="flex flex-col gap-3 rounded-md border p-3">
       <div className="flex flex-col gap-1">
         <p className="text-sm font-medium">支付设置</p>
-        <p className="text-xs text-muted-foreground">仅开放 EPUSDT 和易支付兼容近期主通道。</p>
+        <p className="text-xs text-muted-foreground">
+          仅开放 EPUSDT 和易支付兼容近期主通道；保存配置不会触发真实支付跳转、查单或回调联调。
+        </p>
       </div>
       {actionResult ? <SupplyActionNotice result={actionResult} /> : null}
       <div className="grid gap-3 xl:grid-cols-2">
-        <PaymentConfigForm
-          config={epusdtConfig}
-          actionId={actionId}
-          onUpdatePaymentConfig={onUpdatePaymentConfig}
-          onDisablePaymentConfig={onDisablePaymentConfig}
-        />
-        <PaymentConfigForm
-          config={epayConfig}
-          actionId={actionId}
-          onUpdatePaymentConfig={onUpdatePaymentConfig}
-          onDisablePaymentConfig={onDisablePaymentConfig}
-        />
+        {epusdtConfig ? (
+          <PaymentConfigForm
+            config={epusdtConfig}
+            actionId={actionId}
+            onUpdatePaymentConfig={onUpdatePaymentConfig}
+            onDisablePaymentConfig={onDisablePaymentConfig}
+          />
+        ) : (
+          <PaymentConfigUnavailableBlock displayName="EPUSDT" />
+        )}
+        {epayConfig ? (
+          <PaymentConfigForm
+            config={epayConfig}
+            actionId={actionId}
+            onUpdatePaymentConfig={onUpdatePaymentConfig}
+            onDisablePaymentConfig={onDisablePaymentConfig}
+          />
+        ) : (
+          <PaymentConfigUnavailableBlock displayName="易支付兼容" />
+        )}
       </div>
+    </div>
+  )
+}
+
+function PaymentConfigUnavailableBlock({ displayName }: { displayName: string }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">{displayName}</p>
+          <p className="mt-1 text-xs text-muted-foreground">当前后台未返回该主线通道配置摘要。</p>
+        </div>
+        <Badge variant="outline">不可用</Badge>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        请先确认平台 payment provider 清单；页面不会展示或要求任何上游密钥明文。
+      </p>
     </div>
   )
 }
@@ -5017,6 +5507,21 @@ function PaymentConfigForm({
       <div className="grid gap-2 sm:grid-cols-2">
         <MetricLine label="商户" value={config.merchant_id_masked ?? "-"} />
         <MetricLine label="建链" value={config.create_payment_available ? "可用" : "不可用"} />
+        <MetricLine label="作用域" value={config.scope_type === "platform" ? "平台继承" : "当前 Bot"} />
+        <MetricLine label="密钥" value={config.key_configured ? "已配置" : "未配置"} />
+      </div>
+      <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+        {config.scope_type === "platform" ? (
+          <p>当前继承平台配置；保存后会创建当前 Bot 配置，停用只适用于当前 Bot 配置。</p>
+        ) : null}
+        {config.key_configured ? (
+          <p>密钥已保存但不会回显；再次保存此表单时仍需输入密钥以重写配置。</p>
+        ) : (
+          <p>密钥未配置，保存前需填写商户密钥。</p>
+        )}
+        {!config.create_payment_available ? (
+          <p>建链不可用时，新订单会保留本地记录并返回泛化失败原因。</p>
+        ) : null}
       </div>
       <Input
         value={gatewayUrl}
@@ -5156,86 +5661,134 @@ function SupplyDashboardPanel({
   const pendingSupplierApplicationCount = dashboard.supplier_applications.filter(
     (application) => application.status === "pending",
   ).length
+  const supplierApplications = React.useMemo(
+    () =>
+      [...dashboard.supplier_applications].sort((left, right) => {
+        const leftRank = left.status === "pending" ? 0 : 1
+        const rightRank = right.status === "pending" ? 0 : 1
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank
+        }
+        return right.updated_at.localeCompare(left.updated_at)
+      }),
+    [dashboard.supplier_applications],
+  )
   const marketCount = dashboard.market_offers.length
   const resellerApplicationCount = dashboard.reseller_applications.length
   const resellerProductCount = dashboard.reseller_products.length
+  const supplierActionsDisabled = !dashboard.supplier_enabled
+  const resellerActionsDisabled = !dashboard.reseller_enabled
 
   return (
-    <div className="grid gap-3 xl:grid-cols-2">
-      <PreviewPanel
-        title="供应商工作台"
-        totalCount={supplierCount + dashboard.supplier_applications.length + dashboard.supplier_rules.length}
-        itemCount={Math.max(supplierCount, dashboard.supplier_applications.length, dashboard.supplier_rules.length)}
-        emptyTitle="暂无供货数据"
-        emptyDetail="当前 Bot 尚未开放供货商品或收到代理申请。"
-      >
-        <div className="grid gap-2 sm:grid-cols-2">
-          <MetricLine label="供货商品" value={String(supplierCount)} />
-          <MetricLine label="待审申请" value={String(pendingSupplierApplicationCount)} />
-        </div>
-        <SupplierOfferCreateForm
-          products={products}
-          actionId={actionId}
-          onCreateSupplierOffer={onCreateSupplierOffer}
-        />
-        {dashboard.supplier_offers.slice(0, 3).map((offer) => (
-          <SupplierOfferPreviewRow
-            key={offer.supplier_offer_id}
-            offer={offer}
+    <div className="flex flex-col gap-3">
+      {actionResult ? <SupplyActionNotice result={actionResult} /> : null}
+      <div className="grid gap-3 xl:grid-cols-2">
+        <PreviewPanel
+          title="供应商工作台"
+          totalCount={supplierCount + dashboard.supplier_applications.length + dashboard.supplier_rules.length}
+          itemCount={Math.max(supplierCount, dashboard.supplier_applications.length, dashboard.supplier_rules.length)}
+          emptyTitle="暂无供货数据"
+          emptyDetail="当前 Bot 尚未开放供货商品或收到代理申请。"
+          alwaysShowChildren
+        >
+          <div className="grid gap-2 sm:grid-cols-3">
+            <MetricLine label="能力" value={dashboard.supplier_enabled ? "已开启" : "未开启"} />
+            <MetricLine label="供货商品" value={String(supplierCount)} />
+            <MetricLine label="待审申请" value={String(pendingSupplierApplicationCount)} />
+          </div>
+          {supplierActionsDisabled ? (
+            <SupplyFeatureNotice
+              title="供应商能力未开启"
+              detail="当前仅展示供货安全摘要；创建供货、审批申请和独立规则编辑已禁用。"
+            />
+          ) : null}
+          <SupplierOfferCreateForm
+            products={products}
             actionId={actionId}
-            onSetApproval={onSetSupplierOfferApproval}
+            disabled={supplierActionsDisabled}
+            onCreateSupplierOffer={onCreateSupplierOffer}
           />
-        ))}
-        {dashboard.supplier_rules.length > 0 ? (
-          <SupplierRulesPreview
-            rules={dashboard.supplier_rules}
+          {dashboard.supplier_offers.slice(0, 3).map((offer) => (
+            <SupplierOfferPreviewRow
+              key={offer.supplier_offer_id}
+              offer={offer}
+              actionId={actionId}
+              disabled={supplierActionsDisabled}
+              onSetApproval={onSetSupplierOfferApproval}
+            />
+          ))}
+          {dashboard.supplier_rules.length > 0 ? (
+            <SupplierRulesPreview
+              rules={dashboard.supplier_rules}
+              actionId={actionId}
+              disabled={supplierActionsDisabled}
+              onSetSupplierRule={onSetSupplierRule}
+            />
+          ) : null}
+          <SupplierApplicationsPreview
+            applications={supplierApplications}
             actionId={actionId}
-            onSetSupplierRule={onSetSupplierRule}
-          />
-        ) : null}
-        {dashboard.supplier_applications.slice(0, 4).map((application) => (
-          <SupplierApplicationPreviewRow
-            key={application.supplier_application_id}
-            application={application}
-            actionId={actionId}
+            disabled={supplierActionsDisabled}
             onReview={onReviewSupplierApplication}
           />
-        ))}
-      </PreviewPanel>
-      <PreviewPanel
-        title="代理商工作台"
-        totalCount={marketCount + resellerApplicationCount + resellerProductCount}
-        itemCount={1}
-        emptyTitle="暂无代理数据"
-        emptyDetail="当前 Bot 尚未选择可代理商品。"
-      >
-        <div className="grid gap-2 sm:grid-cols-3">
-          <MetricLine label="可选商品" value={String(marketCount)} />
-          <MetricLine label="我的申请" value={String(resellerApplicationCount)} />
-          <MetricLine label="已代理" value={String(resellerProductCount)} />
-        </div>
-        {actionResult ? <SupplyActionNotice result={actionResult} /> : null}
-        {currentWorkspace ? <ResellerTargetWorkspace workspace={currentWorkspace} /> : null}
-        <ResellerMarketWorkbench
-          offers={dashboard.market_offers}
-          actionId={actionId}
-          filters={marketFilters}
-          onSupplyApply={onSupplyApply}
-          onCreateResellerProduct={onCreateResellerProduct}
-          onApplyMarketFilters={onApplyMarketFilters}
-        />
-        {dashboard.reseller_applications.length > 0 ? (
-          <ResellerApplicationsPreview applications={dashboard.reseller_applications} />
-        ) : null}
-        {dashboard.reseller_products.length > 0 ? (
-          <ResellerProductsPreview
-            products={dashboard.reseller_products}
+        </PreviewPanel>
+        <PreviewPanel
+          title="代理商工作台"
+          totalCount={marketCount + resellerApplicationCount + resellerProductCount}
+          itemCount={1}
+          emptyTitle="暂无代理数据"
+          emptyDetail="当前 Bot 尚未选择可代理商品。"
+        >
+          <div className="grid gap-2 sm:grid-cols-4">
+            <MetricLine label="能力" value={dashboard.reseller_enabled ? "已开启" : "未开启"} />
+            <MetricLine label="可选商品" value={String(marketCount)} />
+            <MetricLine label="我的申请" value={String(resellerApplicationCount)} />
+            <MetricLine label="已代理" value={String(resellerProductCount)} />
+          </div>
+          {resellerActionsDisabled ? (
+            <SupplyFeatureNotice
+              title="代理商能力未开启"
+              detail="供货市场筛选和安全摘要仍可查看；代理申请、上架和代理商品维护已禁用。"
+            />
+          ) : null}
+          {currentWorkspace ? <ResellerTargetWorkspace workspace={currentWorkspace} /> : null}
+          <ResellerMarketWorkbench
+            offers={dashboard.market_offers}
             actionId={actionId}
-            onUpdateResellerProductMetadata={onUpdateResellerProductMetadata}
-            onUpdateResellerProductSales={onUpdateResellerProductSales}
+            actionsDisabled={resellerActionsDisabled}
+            filters={marketFilters}
+            onSupplyApply={onSupplyApply}
+            onCreateResellerProduct={onCreateResellerProduct}
+            onApplyMarketFilters={onApplyMarketFilters}
           />
-        ) : null}
-      </PreviewPanel>
+          {dashboard.reseller_applications.length > 0 ? (
+            <ResellerApplicationsPreview applications={dashboard.reseller_applications} />
+          ) : null}
+          {dashboard.reseller_products.length > 0 ? (
+            <ResellerProductsPreview
+              products={dashboard.reseller_products}
+              actionId={actionId}
+              disabled={resellerActionsDisabled}
+              onUpdateResellerProductMetadata={onUpdateResellerProductMetadata}
+              onUpdateResellerProductSales={onUpdateResellerProductSales}
+            />
+          ) : null}
+        </PreviewPanel>
+      </div>
+    </div>
+  )
+}
+
+function SupplyFeatureNotice({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="rounded-md border bg-muted/30 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">{title}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+        </div>
+        <Badge variant="outline">只读</Badge>
+      </div>
     </div>
   )
 }
@@ -5282,6 +5835,7 @@ function ResellerTargetWorkspace({ workspace }: { workspace: AdminWebWorkspace }
 function ResellerMarketWorkbench({
   offers,
   actionId,
+  actionsDisabled,
   filters,
   onSupplyApply,
   onCreateResellerProduct,
@@ -5289,6 +5843,7 @@ function ResellerMarketWorkbench({
 }: {
   offers: AdminWebSupplyMarketOffer[]
   actionId: string | null
+  actionsDisabled: boolean
   filters: AdminWebSupplyDashboardFilters
   onSupplyApply: (offer: AdminWebSupplyMarketOffer) => void
   onCreateResellerProduct: (payload: AdminWebCreateResellerProductPayload) => void
@@ -5444,6 +5999,7 @@ function ResellerMarketWorkbench({
             key={offer.supplier_offer_id}
             offer={offer}
             actionId={actionId}
+            disabled={actionsDisabled}
             onSupplyApply={onSupplyApply}
             onCreateResellerProduct={onCreateResellerProduct}
           />
@@ -5490,11 +6046,13 @@ function ResellerApplicationsPreview({
 function ResellerProductsPreview({
   products,
   actionId,
+  disabled,
   onUpdateResellerProductMetadata,
   onUpdateResellerProductSales,
 }: {
   products: AdminWebResellerProduct[]
   actionId: string | null
+  disabled: boolean
   onUpdateResellerProductMetadata: (
     resellerProductId: number,
     payload: AdminWebResellerProductMetadataPayload,
@@ -5516,6 +6074,7 @@ function ResellerProductsPreview({
           key={product.reseller_product_id}
           product={product}
           actionId={actionId}
+          disabled={disabled}
           onUpdateResellerProductMetadata={onUpdateResellerProductMetadata}
           onUpdateResellerProductSales={onUpdateResellerProductSales}
         />
@@ -5538,6 +6097,7 @@ function CloneBotRecentLists({
   orderObservability,
   orderObservabilityLoading,
   orderObservabilityError,
+  orderObservabilityOutTradeNo,
   onCreateProduct,
   onUpdateProductMetadata,
   onUpdateProductSales,
@@ -5545,11 +6105,13 @@ function CloneBotRecentLists({
   onImportProductInventory,
   onUploadProductDeliveryFile,
   onLoadOrderDiagnostics,
+  onLoadOrderObservabilityForOrder,
   onApplyProductFilters,
   onApplyOrderFilters,
   onProductPageChange,
   onOrderPageChange,
   onRefreshOrderObservability,
+  onClearOrderObservabilityScope,
   onRefresh,
 }: {
   products: AdminWebTenantProductsResponse
@@ -5565,6 +6127,7 @@ function CloneBotRecentLists({
   orderObservability: AdminWebTenantOrderObservability | null
   orderObservabilityLoading: boolean
   orderObservabilityError: string | null
+  orderObservabilityOutTradeNo: string | null
   onCreateProduct: (payload: AdminWebCreateProductPayload) => void
   onUpdateProductMetadata: (productId: number, payload: AdminWebProductMetadataPayload) => void
   onUpdateProductSales: (productId: number, payload: AdminWebProductSalesPayload) => void
@@ -5572,11 +6135,13 @@ function CloneBotRecentLists({
   onImportProductInventory: (productId: number, payload: AdminWebProductInventoryImportPayload) => Promise<boolean>
   onUploadProductDeliveryFile: (productId: number, file: File | null) => Promise<boolean>
   onLoadOrderDiagnostics: (order: AdminWebTenantOrder) => void
+  onLoadOrderObservabilityForOrder: (order: AdminWebTenantOrder) => void
   onApplyProductFilters: (filters: AdminWebTenantProductFilters) => void
   onApplyOrderFilters: (filters: AdminWebTenantOrderFilters) => void
   onProductPageChange: (offset: number) => void
   onOrderPageChange: (offset: number) => void
   onRefreshOrderObservability: () => void
+  onClearOrderObservabilityScope: () => void
   onRefresh: () => void
 }) {
   const [selectedProductIds, setSelectedProductIds] = React.useState<number[]>([])
@@ -5699,7 +6264,9 @@ function CloneBotRecentLists({
           observability={orderObservability}
           isLoading={orderObservabilityLoading}
           errorMessage={orderObservabilityError}
+          outTradeNo={orderObservabilityOutTradeNo}
           onRefresh={onRefreshOrderObservability}
+          onClearScope={onClearOrderObservabilityScope}
         />
         {orders.items.map((order) => (
           <OrderPreviewRow
@@ -5707,7 +6274,12 @@ function CloneBotRecentLists({
             order={order}
             isDiagnosticsLoading={orderDiagnosticsActionId === `order:diagnostics:${order.out_trade_no}`}
             isDiagnosticsSelected={selectedOrderDiagnostics?.out_trade_no === order.out_trade_no}
+            isObservabilityLoading={
+              orderObservabilityLoading && orderObservabilityOutTradeNo === order.out_trade_no
+            }
+            isObservabilitySelected={orderObservabilityOutTradeNo === order.out_trade_no}
             onLoadOrderDiagnostics={onLoadOrderDiagnostics}
+            onLoadOrderObservabilityForOrder={onLoadOrderObservabilityForOrder}
           />
         ))}
         <TenantListPagination
@@ -6034,10 +6606,12 @@ function PreviewPanel({
 function SupplierOfferCreateForm({
   products,
   actionId,
+  disabled,
   onCreateSupplierOffer,
 }: {
   products: AdminWebTenantProduct[]
   actionId: string | null
+  disabled: boolean
   onCreateSupplierOffer: (payload: AdminWebCreateSupplierOfferPayload) => void
 }) {
   const availableProducts = products.filter((product) => product.status === "on")
@@ -6045,7 +6619,7 @@ function SupplierOfferCreateForm({
   const [suggestedPrice, setSuggestedPrice] = React.useState("")
   const [minSalePrice, setMinSalePrice] = React.useState("")
   const [requiresApproval, setRequiresApproval] = React.useState(true)
-  const isActionBusy = actionId !== null
+  const isActionBusy = actionId !== null || disabled
   const selectedProduct = availableProducts.find((product) => String(product.product_id) === productId)
   const isCreating = selectedProduct ? actionId === `supplier-offer:create:${selectedProduct.product_id}` : false
 
@@ -6143,14 +6717,16 @@ function SupplierOfferCreateForm({
 function SupplierOfferPreviewRow({
   offer,
   actionId,
+  disabled,
   onSetApproval,
 }: {
   offer: AdminWebSupplierOffer
   actionId: string | null
+  disabled: boolean
   onSetApproval: (supplierOfferId: number, payload: AdminWebSupplierOfferApprovalPayload) => void
 }) {
   const actionKey = `supplier-offer:approval:${offer.supplier_offer_id}`
-  const isActionBusy = actionId !== null
+  const isActionBusy = actionId !== null || disabled
   const isUpdating = actionId === actionKey
 
   return (
@@ -6188,19 +6764,61 @@ function SupplierOfferPreviewRow({
   )
 }
 
+function SupplierApplicationsPreview({
+  applications,
+  actionId,
+  disabled,
+  onReview,
+}: {
+  applications: AdminWebSupplierApplication[]
+  actionId: string | null
+  disabled: boolean
+  onReview: (payload: AdminWebSupplierApplicationReviewPayload) => void
+}) {
+  const pendingCount = applications.filter((application) => application.status === "pending").length
+
+  return (
+    <div className="flex flex-col gap-2">
+      <Separator />
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">代理申请审核</p>
+          <p className="mt-1 text-xs text-muted-foreground">待审申请优先显示。</p>
+        </div>
+        <Badge variant={pendingCount > 0 ? "secondary" : "outline"}>待审 {pendingCount}</Badge>
+      </div>
+      {applications.length > 0 ? (
+        applications.slice(0, 4).map((application) => (
+          <SupplierApplicationPreviewRow
+            key={application.supplier_application_id}
+            application={application}
+            actionId={actionId}
+            disabled={disabled}
+            onReview={onReview}
+          />
+        ))
+      ) : (
+        <StatusBlock title="暂无代理申请" detail="有代理商提交申请后会出现在这里。" />
+      )}
+    </div>
+  )
+}
+
 function SupplierApplicationPreviewRow({
   application,
   actionId,
+  disabled,
   onReview,
 }: {
   application: AdminWebSupplierApplication
   actionId: string | null
+  disabled: boolean
   onReview: (payload: AdminWebSupplierApplicationReviewPayload) => void
 }) {
   const canReview = application.status === "pending"
   const approveActionId = `approve:${application.supplier_application_id}`
   const rejectActionId = `reject:${application.supplier_application_id}`
-  const isActionBusy = actionId !== null
+  const isActionBusy = actionId !== null || disabled
 
   return (
     <div className="flex flex-col gap-3 rounded-md border p-3">
@@ -6255,10 +6873,12 @@ function SupplierApplicationPreviewRow({
 function SupplierRulesPreview({
   rules,
   actionId,
+  disabled,
   onSetSupplierRule,
 }: {
   rules: AdminWebSupplierRule[]
   actionId: string | null
+  disabled: boolean
   onSetSupplierRule: (payload: AdminWebSupplierRulePayload) => void
 }) {
   return (
@@ -6273,6 +6893,7 @@ function SupplierRulesPreview({
           key={rule.supplier_rule_id}
           rule={rule}
           actionId={actionId}
+          disabled={disabled}
           onSetSupplierRule={onSetSupplierRule}
         />
       ))}
@@ -6283,18 +6904,20 @@ function SupplierRulesPreview({
 function SupplierRuleEditor({
   rule,
   actionId,
+  disabled,
   onSetSupplierRule,
 }: {
   rule: AdminWebSupplierRule
   actionId: string | null
+  disabled: boolean
   onSetSupplierRule: (payload: AdminWebSupplierRulePayload) => void
 }) {
   const [pricingValue, setPricingValue] = React.useState(rule.pricing_value)
   const [minSalePrice, setMinSalePrice] = React.useState(rule.min_sale_price ?? "")
   const actionKey = `supplier-rule:${rule.supplier_rule_id}`
-  const isActionBusy = actionId !== null
+  const isActionBusy = actionId !== null || disabled
   const isUpdating = actionId === actionKey
-  const canEdit = rule.status === "pending" || rule.status === "active"
+  const canEdit = !disabled && (rule.status === "pending" || rule.status === "active")
 
   React.useEffect(() => {
     setPricingValue(rule.pricing_value)
@@ -6356,11 +6979,13 @@ function SupplierRuleEditor({
 function MarketOfferPreviewRow({
   offer,
   actionId,
+  disabled,
   onSupplyApply,
   onCreateResellerProduct,
 }: {
   offer: AdminWebSupplyMarketOffer
   actionId: string | null
+  disabled: boolean
   onSupplyApply: (offer: AdminWebSupplyMarketOffer) => void
   onCreateResellerProduct: (payload: AdminWebCreateResellerProductPayload) => void
 }) {
@@ -6369,11 +6994,11 @@ function MarketOfferPreviewRow({
   const [displayName, setDisplayName] = React.useState(offer.product_name)
   const applyActionId = `apply:${offer.supplier_offer_id}`
   const createActionId = `create:${offer.supplier_offer_id}`
-  const isActionBusy = actionId !== null
+  const isActionBusy = actionId !== null || disabled
   const isApplying = actionId === applyActionId
   const isCreating = actionId === createActionId
   const canRequestApproval =
-    offer.requires_approval && offer.reseller_rule_status !== "pending" && !offer.can_create_reseller_product
+    !disabled && offer.requires_approval && offer.reseller_rule_status !== "pending" && !offer.can_create_reseller_product
 
   React.useEffect(() => {
     setSalePrice(suggestedSalePrice)
@@ -6429,7 +7054,7 @@ function MarketOfferPreviewRow({
           </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs text-muted-foreground">
-              上架到当前 Bot 后，买家侧只看到代理店铺商品。
+              {disabled ? "代理商能力未开启，暂不能上架到当前 Bot。" : "上架到当前 Bot 后，买家侧只看到代理店铺商品。"}
             </p>
             <Button type="submit" size="sm" disabled={isActionBusy || !salePrice.trim()}>
               <PlusIcon data-icon="inline-start" />
@@ -6440,7 +7065,9 @@ function MarketOfferPreviewRow({
       ) : (
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-muted-foreground">
-            {offer.reseller_rule_status === "pending"
+            {disabled
+              ? "代理商能力未开启，暂不能提交代理申请。"
+              : offer.reseller_rule_status === "pending"
               ? "申请已提交，等待供应商审核。"
               : "该商品需要供应商审批后才能设置售价并上架。"}
           </p>
@@ -6463,11 +7090,13 @@ function MarketOfferPreviewRow({
 function ResellerProductPreviewRow({
   product,
   actionId,
+  disabled,
   onUpdateResellerProductMetadata,
   onUpdateResellerProductSales,
 }: {
   product: AdminWebResellerProduct
   actionId: string | null
+  disabled: boolean
   onUpdateResellerProductMetadata: (
     resellerProductId: number,
     payload: AdminWebResellerProductMetadataPayload,
@@ -6483,7 +7112,7 @@ function ResellerProductPreviewRow({
   const [sortOrder, setSortOrder] = React.useState(String(product.sort_order))
   const salesActionKey = `reseller-product:sales:${product.reseller_product_id}`
   const metadataActionKey = `reseller-product:metadata:${product.reseller_product_id}`
-  const isActionBusy = actionId !== null
+  const isActionBusy = actionId !== null || disabled
   const isUpdatingSales = actionId === salesActionKey
   const isUpdatingMetadata = actionId === metadataActionKey
 
@@ -6689,15 +7318,20 @@ function ProductBatchStatusToolbar({
 
   return (
     <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
-      <label className="flex items-center gap-2 text-sm">
-        <Checkbox
-          checked={allSelected}
-          disabled={disabled}
-          aria-label="选择当前页全部商品"
-          onCheckedChange={(checked) => onToggleAll(checked === true)}
-        />
-        当前页全选
-      </label>
+      <div className="min-w-0">
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox
+            checked={allSelected ? true : selectedCount > 0 ? "indeterminate" : false}
+            disabled={disabled}
+            aria-label="选择当前页全部商品"
+            onCheckedChange={(checked) => onToggleAll(checked === true)}
+          />
+          当前页全选
+        </label>
+        <p className="mt-1 text-xs text-muted-foreground">
+          仅操作当前页 {products.length} 个商品，单次最多 50 个。
+        </p>
+      </div>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <Badge variant="outline">已选 {selectedCount}</Badge>
         <Button
@@ -6916,12 +7550,18 @@ function OrderPreviewRow({
   order,
   isDiagnosticsLoading,
   isDiagnosticsSelected,
+  isObservabilityLoading,
+  isObservabilitySelected,
   onLoadOrderDiagnostics,
+  onLoadOrderObservabilityForOrder,
 }: {
   order: AdminWebTenantOrder
   isDiagnosticsLoading: boolean
   isDiagnosticsSelected: boolean
+  isObservabilityLoading: boolean
+  isObservabilitySelected: boolean
   onLoadOrderDiagnostics: (order: AdminWebTenantOrder) => void
+  onLoadOrderObservabilityForOrder: (order: AdminWebTenantOrder) => void
 }) {
   return (
     <div className="flex flex-col gap-2 rounded-md border p-3">
@@ -6941,16 +7581,27 @@ function OrderPreviewRow({
         <MetricLine label="支付" value={paymentModeLabel(order.payment_mode)} />
         <MetricLine label="创建" value={formatDateTime(order.created_at)} />
       </div>
-      <Button
-        type="button"
-        size="sm"
-        variant={isDiagnosticsSelected ? "secondary" : "outline"}
-        className="w-fit"
-        disabled={isDiagnosticsLoading}
-        onClick={() => onLoadOrderDiagnostics(order)}
-      >
-        {isDiagnosticsLoading ? "正在读取" : isDiagnosticsSelected ? "已打开排障" : "订单排障"}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant={isDiagnosticsSelected ? "secondary" : "outline"}
+          disabled={isDiagnosticsLoading}
+          onClick={() => onLoadOrderDiagnostics(order)}
+        >
+          {isDiagnosticsLoading ? "正在读取" : isDiagnosticsSelected ? "已打开排障" : "订单排障"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={isObservabilitySelected ? "secondary" : "outline"}
+          disabled={isObservabilityLoading}
+          onClick={() => onLoadOrderObservabilityForOrder(order)}
+        >
+          <ListTreeIcon data-icon="inline-start" />
+          {isObservabilityLoading ? "观测中" : isObservabilitySelected ? "已观测此单" : "观测此单"}
+        </Button>
+      </div>
     </div>
   )
 }
@@ -6959,12 +7610,16 @@ function OrderObservabilityPanel({
   observability,
   isLoading,
   errorMessage,
+  outTradeNo,
   onRefresh,
+  onClearScope,
 }: {
   observability: AdminWebTenantOrderObservability | null
   isLoading: boolean
   errorMessage: string | null
+  outTradeNo: string | null
   onRefresh: () => void
+  onClearScope: () => void
 }) {
   const hasItems = Boolean(
     observability &&
@@ -6980,13 +7635,27 @@ function OrderObservabilityPanel({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">订单观测</p>
-          <p className="mt-1 text-xs text-muted-foreground">最近支付回调异常与外部履约尝试。</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {outTradeNo ? "当前仅展示指定订单的安全观测摘要。" : "最近支付回调异常与外部履约尝试。"}
+          </p>
         </div>
-        <Button type="button" size="sm" variant="outline" disabled={isLoading} onClick={onRefresh}>
-          <RefreshCwIcon data-icon="inline-start" />
-          {isLoading ? "刷新中" : "刷新"}
-        </Button>
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          {outTradeNo ? (
+            <Button type="button" size="sm" variant="outline" disabled={isLoading} onClick={onClearScope}>
+              查看全部
+            </Button>
+          ) : null}
+          <Button type="button" size="sm" variant="outline" disabled={isLoading} onClick={onRefresh}>
+            <RefreshCwIcon data-icon="inline-start" />
+            {isLoading ? "刷新中" : "刷新"}
+          </Button>
+        </div>
       </div>
+      {outTradeNo ? (
+        <Badge variant="outline" className="w-fit max-w-full truncate">
+          订单 {outTradeNo}
+        </Badge>
+      ) : null}
       {errorMessage ? <SupplyActionNotice result={{ kind: "error", message: errorMessage }} /> : null}
       {!observability && !isLoading && !errorMessage ? (
         <StatusBlock title="暂无观测数据" detail="刷新后可查看最近的支付回调和外部履约记录。" />
@@ -7947,6 +8616,197 @@ function normalizeProductStatus(status: string): AdminWebProductSalesPayload["st
   return "draft"
 }
 
+function validatePlatformPlanDraft(
+  draft: PlatformPlanDraft,
+  options: { requireCode: boolean },
+): PlatformPlanFieldErrors {
+  const errors: PlatformPlanFieldErrors = {}
+  const code = draft.code?.trim() ?? ""
+  const name = draft.name.trim()
+  const monthlyPrice = draft.monthlyPrice.trim()
+
+  if (options.requireCode) {
+    if (!code) {
+      errors.code = "计划代码必填"
+    } else if (code.length > 64) {
+      errors.code = "计划代码最多 64 位"
+    }
+  }
+
+  if (!name) {
+    errors.name = "计划名称必填"
+  } else if (name.length > 128) {
+    errors.name = "计划名称最多 128 位"
+  }
+
+  if (!monthlyPrice) {
+    errors.monthlyPrice = "月费必填"
+  } else if (!isNonNegativeDecimalText(monthlyPrice)) {
+    errors.monthlyPrice = "月费必须是非负金额，最多 8 位小数"
+  }
+
+  const trialDaysError = platformPlanIntegerFieldError(draft.trialDays, "试用天数", 3650)
+  if (trialDaysError) {
+    errors.trialDays = trialDaysError
+  }
+  const graceDaysError = platformPlanIntegerFieldError(draft.graceDays, "宽限天数", 365)
+  if (graceDaysError) {
+    errors.graceDays = graceDaysError
+  }
+
+  return errors
+}
+
+function platformPlanFieldErrorList(errors: PlatformPlanFieldErrors): string[] {
+  const fields: PlatformPlanFieldKey[] = ["code", "name", "monthlyPrice", "trialDays", "graceDays"]
+  return fields
+    .map((field) => errors[field])
+    .filter((error): error is string => Boolean(error))
+}
+
+function platformPlanIntegerFieldError(value: string, label: string, max: number): string | null {
+  const normalized = value.trim()
+  if (!normalized) {
+    return `${label}必填`
+  }
+  if (!/^\d+$/.test(normalized)) {
+    return `${label}必须是整数`
+  }
+  const numericValue = Number(normalized)
+  if (!Number.isSafeInteger(numericValue) || numericValue > max) {
+    return `${label}范围为 0-${max}`
+  }
+  return null
+}
+
+function hasPlatformPlanDraftChanges(
+  plan: AdminWebPlatformDashboard["subscription_plans"][number],
+  draft: PlatformPlanDraft,
+): boolean {
+  return (
+    draft.name.trim() !== plan.name ||
+    draft.monthlyPrice.trim() !== plan.monthly_price ||
+    draft.trialDays.trim() !== String(plan.trial_days) ||
+    draft.graceDays.trim() !== String(plan.grace_days)
+  )
+}
+
+function createPlatformWithdrawalReviewDraft(): PlatformWithdrawalReviewDraft {
+  return {
+    rejectNote: "",
+    completeNote: "",
+    payoutReference: "",
+    payoutProofUrl: "",
+  }
+}
+
+function validatePlatformWithdrawalReviewDraft(
+  draft: PlatformWithdrawalReviewDraft,
+): PlatformWithdrawalReviewErrors {
+  const errors: PlatformWithdrawalReviewErrors = {}
+  if (draft.rejectNote.length > 500) {
+    errors.rejectNote = "拒绝备注最多 500 字"
+  }
+  if (draft.completeNote.length > 500) {
+    errors.completeNote = "完成备注最多 500 字"
+  }
+  if (draft.payoutReference.length > 128) {
+    errors.payoutReference = "付款参考最多 128 字"
+  }
+  if (draft.payoutProofUrl.length > 1000) {
+    errors.payoutProofUrl = "凭证 URL 最多 1000 字"
+  }
+  return errors
+}
+
+function platformWithdrawalReviewErrorList(
+  errors: PlatformWithdrawalReviewErrors,
+  fields: PlatformWithdrawalReviewFieldKey[],
+): string[] {
+  return fields
+    .map((field) => errors[field])
+    .filter((error): error is string => Boolean(error))
+}
+
+function platformWithdrawalRejectErrorList(
+  draft: PlatformWithdrawalReviewDraft,
+  errors: PlatformWithdrawalReviewErrors,
+): string[] {
+  const result = platformWithdrawalReviewErrorList(errors, ["rejectNote"])
+  if (!draft.rejectNote.trim()) {
+    result.unshift("拒绝备注必填")
+  }
+  return result
+}
+
+function isPlatformWithdrawalPending(withdrawal: AdminWebPlatformWithdrawal): boolean {
+  return withdrawal.status === "pending"
+}
+
+function platformSupplierOfferMatchesQuery(offer: AdminWebPlatformSupplierOffer, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) {
+    return true
+  }
+  return [
+    offer.product_name,
+    offer.supplier_store_name,
+    offer.delivery_type,
+    deliveryTypeLabel(offer.delivery_type),
+    offer.status,
+    supplierOfferStatusLabel(offer.status),
+    platformSupplierOfferApprovalLabel(offer),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .includes(normalizedQuery)
+}
+
+function platformSupplierOfferMatchesStatus(
+  offer: AdminWebPlatformSupplierOffer,
+  filter: PlatformSupplierOfferStatusFilter,
+): boolean {
+  if (filter === "all") {
+    return true
+  }
+  return offer.status === filter
+}
+
+function platformSupplierOfferMatchesApproval(
+  offer: AdminWebPlatformSupplierOffer,
+  filter: PlatformSupplierOfferApprovalFilter,
+): boolean {
+  if (filter === "all") {
+    return true
+  }
+  if (filter === "approval_required") {
+    return offer.requires_approval
+  }
+  return !offer.requires_approval
+}
+
+function platformSupplierOfferMatchesStock(
+  offer: AdminWebPlatformSupplierOffer,
+  filter: PlatformSupplierOfferStockFilter,
+): boolean {
+  if (filter === "all") {
+    return true
+  }
+  if (filter === "available") {
+    return offer.available_count > 0
+  }
+  return offer.available_count <= 0
+}
+
+function platformSupplierOfferApprovalLabel(offer: AdminWebPlatformSupplierOffer): string {
+  return offer.requires_approval ? "需审批" : "免审批"
+}
+
+function platformSupplierOfferActionReasonError(reason: string): string | null {
+  return reason.length > 255 ? "操作原因最多 255 字" : null
+}
+
 function isPositiveDecimalText(value: string | undefined): boolean {
   if (value === undefined) {
     return true
@@ -8130,6 +8990,181 @@ function platformWebhookStatusLabel(status: string): string {
     return "已停用"
   }
   return status
+}
+
+function platformRiskAuditActionMatches(action: string, filter: PlatformRiskAuditActionFilter): boolean {
+  if (filter === "all") {
+    return true
+  }
+  if (filter === "user") {
+    return action.includes(".user_")
+  }
+  if (filter === "tenant") {
+    return action.includes(".tenant_")
+  }
+  if (filter === "supply") {
+    return action.includes(".supplier_offer_") || action.includes(".reseller_product_")
+  }
+  if (filter === "order") {
+    return action.includes(".order_")
+  }
+  return action.includes(".dispute_") || action.includes(".after_sale_")
+}
+
+function platformRiskAuditStatusMatches(
+  status: string | null | undefined,
+  filter: PlatformRiskAuditStatusFilter,
+): boolean {
+  if (filter === "all") {
+    return true
+  }
+  const normalizedStatus = status ?? ""
+  if (filter === "other") {
+    return !["banned", "active", "suspended", "grace", "disabled"].includes(normalizedStatus)
+  }
+  return normalizedStatus === filter
+}
+
+function platformRiskAuditSearchText(log: AdminWebPlatformRiskAuditLog): string {
+  return [
+    log.action,
+    platformRiskAuditActionLabel(log.action),
+    log.target_type,
+    platformRiskAuditTargetLabel(log.target_type),
+    log.actor_username,
+    log.actor_telegram_user_id ? `tg ${log.actor_telegram_user_id}` : "",
+    log.target_telegram_user_id ? `tg ${log.target_telegram_user_id}` : "",
+    log.previous_status,
+    platformRiskAuditStatusLabel(log.previous_status),
+    log.new_status,
+    platformRiskAuditStatusLabel(log.new_status),
+    log.reason,
+    log.risk_rule,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+}
+
+function platformRiskAuditActionLabel(action: string): string {
+  if (action === "platform_risk.user_banned") {
+    return "手动封禁用户"
+  }
+  if (action === "platform_risk.user_auto_banned") {
+    return "自动封禁用户"
+  }
+  if (action === "platform_risk.user_unbanned") {
+    return "解除用户封禁"
+  }
+  if (action === "platform_risk.tenant_suspended") {
+    return "冻结租户"
+  }
+  if (action === "platform_risk.tenant_resumed") {
+    return "恢复租户"
+  }
+  if (action === "platform_risk.supplier_offer_disabled") {
+    return "供货商品软下架"
+  }
+  if (action === "platform_risk.reseller_product_disabled") {
+    return "代理商品停用"
+  }
+  if (action === "platform_risk.order_creation_blocked") {
+    return "订单创建拦截"
+  }
+  if (action.startsWith("platform_risk.dispute_")) {
+    return "争议风控"
+  }
+  if (action.startsWith("platform_risk.after_sale_")) {
+    return "售后风控"
+  }
+  return action.startsWith("platform_risk.") ? action.slice("platform_risk.".length) : action
+}
+
+function platformRiskAuditTargetLabel(targetType?: string | null): string {
+  if (!targetType) {
+    return "平台"
+  }
+  if (targetType === "telegram_user" || targetType === "user") {
+    return "Telegram 用户"
+  }
+  if (targetType === "tenant") {
+    return "租户"
+  }
+  if (targetType === "supplier_offer") {
+    return "供货商品"
+  }
+  if (targetType === "reseller_product") {
+    return "代理商品"
+  }
+  if (targetType === "order") {
+    return "订单"
+  }
+  if (targetType === "dispute") {
+    return "争议"
+  }
+  if (targetType === "after_sale") {
+    return "售后"
+  }
+  return targetType
+}
+
+function platformRiskAuditActorLabel(log: AdminWebPlatformRiskAuditLog): string {
+  if (log.actor_username) {
+    return `@${log.actor_username}`
+  }
+  if (log.actor_telegram_user_id) {
+    return `TG ${log.actor_telegram_user_id}`
+  }
+  return "系统"
+}
+
+function platformRiskAuditStatusLabel(status?: string | null): string {
+  if (!status) {
+    return "-"
+  }
+  if (status === "banned") {
+    return "已封禁"
+  }
+  if (status === "active") {
+    return "已恢复"
+  }
+  if (status === "suspended") {
+    return "已冻结"
+  }
+  if (status === "disabled") {
+    return "已停用"
+  }
+  if (status === "grace") {
+    return "宽限"
+  }
+  if (status === "on") {
+    return "可用"
+  }
+  if (status === "pending") {
+    return "待处理"
+  }
+  if (status === "reviewing") {
+    return "处理中"
+  }
+  if (status === "closed") {
+    return "已关闭"
+  }
+  if (status === "refunded") {
+    return "已退款"
+  }
+  return status
+}
+
+function platformRiskAuditStatusBadgeVariant(
+  status?: string | null,
+): "default" | "secondary" | "destructive" | "outline" {
+  if (status === "banned" || status === "suspended" || status === "disabled") {
+    return "destructive"
+  }
+  if (status === "active" || status === "grace" || status === "on" || status === "closed" || status === "refunded") {
+    return "secondary"
+  }
+  return "outline"
 }
 
 function withdrawalStatusLabel(status: string): string {
