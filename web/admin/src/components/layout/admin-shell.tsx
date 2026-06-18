@@ -197,9 +197,12 @@ import {
 } from "@/lib/telegram-webapp"
 import { cn } from "@/lib/utils"
 
+type AdminView = "总览" | "Bot工作台" | "克隆Bot" | "商户结算" | "系统设置"
+
 type NavItem = {
   label: string
   icon: LucideIcon
+  value: AdminView
   active?: boolean
 }
 
@@ -243,12 +246,20 @@ const defaultTenantReportJobFilters = {
 }
 
 const sidebarNav: NavItem[] = [
-  { label: "总览", icon: LayoutDashboardIcon },
-  { label: "Bot 工作台", icon: BotIcon, active: true },
-  { label: "克隆 Bot", icon: BoxesIcon },
-  { label: "商户结算", icon: CircleDollarSignIcon },
-  { label: "系统设置", icon: SettingsIcon },
+  { label: "总览", icon: LayoutDashboardIcon, value: "总览" },
+  { label: "Bot 工作台", icon: BotIcon, value: "Bot工作台" },
+  { label: "克隆 Bot", icon: BoxesIcon, value: "克隆Bot" },
+  { label: "商户结算", icon: CircleDollarSignIcon, value: "商户结算" },
+  { label: "系统设置", icon: SettingsIcon, value: "系统设置" },
 ]
+
+const viewTitles: Record<AdminView, { title: string; description: string }> = {
+  "总览": { title: "总览", description: "工作区摘要与关键指标。" },
+  "Bot工作台": { title: "Bot 管理台", description: "主 Bot、克隆 Bot、供应商与代理商入口。" },
+  "克隆Bot": { title: "克隆 Bot 管理", description: "店铺设置、支付、商品订单与供货。" },
+  "商户结算": { title: "商户结算", description: "订阅、财务与提现。" },
+  "系统设置": { title: "系统设置", description: "支付通道、套餐、API Key 与店铺配置。" },
+}
 
 const partnerCards = [
   {
@@ -335,8 +346,12 @@ function WorkspaceSelect({
 
 function Sidebar({
   currentWorkspace,
+  activeView,
+  onViewChange,
 }: {
   currentWorkspace?: AdminWebWorkspace
+  activeView: AdminView
+  onViewChange: (view: AdminView) => void
 }) {
   return (
     <aside className="hidden min-h-screen w-64 shrink-0 border-r bg-card md:flex md:flex-col">
@@ -358,9 +373,10 @@ function Sidebar({
 
           return (
             <Button
-              key={item.label}
-              variant={item.active ? "secondary" : "ghost"}
+              key={item.value}
+              variant={activeView === item.value ? "secondary" : "ghost"}
               className="h-10 justify-start px-3"
+              onClick={() => onViewChange(item.value)}
             >
               <Icon data-icon="inline-start" />
               <span className="truncate">{item.label}</span>
@@ -385,7 +401,13 @@ function Sidebar({
   )
 }
 
-function MobileNav() {
+function MobileNav({
+  activeView,
+  onViewChange,
+}: {
+  activeView: AdminView
+  onViewChange: (view: AdminView) => void
+}) {
   return (
     <div className="flex gap-2 overflow-x-auto md:hidden">
       {sidebarNav.map((item) => {
@@ -393,10 +415,11 @@ function MobileNav() {
 
         return (
           <Button
-            key={item.label}
-            variant={item.active ? "secondary" : "outline"}
+            key={item.value}
+            variant={activeView === item.value ? "secondary" : "outline"}
             size="sm"
             className="shrink-0"
+            onClick={() => onViewChange(item.value)}
           >
             <Icon data-icon="inline-start" />
             {item.label}
@@ -488,10 +511,12 @@ function PrimaryBotPanel({
   platformWorkspace,
   user,
   workspaces,
+  view,
 }: {
   platformWorkspace?: AdminWebWorkspace
   user?: AdminWebUser
   workspaces: AdminWebWorkspace[]
+  view?: AdminView
 }) {
   const tenantCount = workspaces.filter((workspace) => workspace.kind === "tenant").length
   const [dashboard, setDashboard] = React.useState<AdminWebPlatformDashboard | null>(null)
@@ -545,6 +570,78 @@ function PrimaryBotPanel({
     } finally {
       setActionId(null)
     }
+  }
+
+  if (view && view !== "Bot工作台") {
+    if (!canUsePlatform) {
+      return (
+        <Card>
+          <CardHeader>
+            <CardTitle>平台管理</CardTitle>
+            <CardDescription>当前账号没有平台管理员权限。</CardDescription>
+          </CardHeader>
+        </Card>
+      )
+    }
+    return (
+      <div className="flex flex-col gap-4">
+        {isLoading ? <StatusBlock title="正在加载平台数据" detail="读取主 Bot 管理摘要。" /> : null}
+        {errorMessage ? (
+          <div className="flex flex-col gap-3 rounded-md border p-3">
+            <p className="text-sm font-medium">平台数据加载失败</p>
+            <p className="text-xs text-muted-foreground">{errorMessage}</p>
+            <Button variant="outline" size="sm" className="w-fit" onClick={loadPlatformDashboard}>
+              重新加载
+            </Button>
+          </div>
+        ) : null}
+        {actionResult ? <SupplyActionNotice result={actionResult} /> : null}
+        {dashboard && view === "总览" ? (
+          <>
+            <BotListCard workspaces={workspaces} isLoading={false} />
+            <PlatformStatsGrid dashboard={dashboard} />
+            <PlatformTenantSubscriptionStatusPanel
+              dashboard={dashboard}
+              actionId={actionId}
+              onRunAction={runPlatformAction}
+            />
+          </>
+        ) : null}
+        {dashboard && view === "克隆Bot" ? (
+          <PlatformTenantBotsPanel
+            tenants={dashboard.tenants}
+            stats={dashboard.stats}
+            filters={platformFilters}
+            actionId={actionId}
+            onRunAction={runPlatformAction}
+            onFiltersChange={setPlatformFilters}
+          />
+        ) : null}
+        {dashboard && view === "商户结算" ? (
+          <PlatformWithdrawalsPanel
+            withdrawals={dashboard.withdrawals}
+            actionId={actionId}
+            onRunAction={runPlatformAction}
+            onRefresh={loadPlatformDashboard}
+          />
+        ) : null}
+        {dashboard && view === "系统设置" ? (
+          <div className="grid gap-4 xl:grid-cols-2">
+            <PlatformPaymentProvidersPanel providers={dashboard.payment_providers} />
+            <PlatformSubscriptionPlansPanel
+              plans={dashboard.subscription_plans}
+              actionId={actionId}
+              onRunAction={runPlatformAction}
+            />
+            <PlatformSupplyControlPanel
+              offers={dashboard.supplier_offers}
+              actionId={actionId}
+              onRunAction={runPlatformAction}
+            />
+          </div>
+        ) : null}
+      </div>
+    )
   }
 
   return (
@@ -2097,8 +2194,10 @@ function PlatformSupplyControlPanel({
 
 function CloneBotPanel({
   currentWorkspace,
+  view,
 }: {
   currentWorkspace?: AdminWebWorkspace
+  view?: AdminView
 }) {
   const isTenantWorkspace = currentWorkspace?.kind === "tenant"
   const [overview, setOverview] = React.useState<AdminWebTenantOverview | null>(null)
@@ -3592,6 +3691,191 @@ function CloneBotPanel({
     setSelectedOrderDiagnostics(null)
     setOrderFilters((current) => normalizeTenantOrderFilters({ ...current, offset }))
   }, [])
+
+  const renderStoreSettingsForm = () =>
+    storeSettings ? (
+      <Card>
+        <CardHeader>
+          <CardTitle>店铺设置</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <CloneBotStoreSettingsForm
+            settings={storeSettings}
+            actionId={storeSettingsActionId}
+            actionResult={storeSettingsActionResult}
+            onUpdateStoreSettings={handleUpdateStoreSettings}
+          />
+        </CardContent>
+      </Card>
+    ) : null
+
+  const renderPaymentSettings = () =>
+    paymentConfigs ? (
+      <Card>
+        <CardHeader>
+          <CardTitle>支付设置</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <CloneBotPaymentSettingsPanel
+            configs={paymentConfigs.providers}
+            actionId={paymentActionId}
+            actionResult={paymentActionResult}
+            onUpdatePaymentConfig={handleUpdatePaymentConfig}
+            onDisablePaymentConfig={handleDisablePaymentConfig}
+          />
+        </CardContent>
+      </Card>
+    ) : null
+
+  if (view && view !== "Bot工作台") {
+    if (!isTenantWorkspace) {
+      return (
+        <Card>
+          <CardHeader>
+            <CardTitle>克隆 Bot</CardTitle>
+            <CardDescription>请从顶部工作区选择器切换到店铺工作区。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <StatusBlock title="未选择克隆 Bot" detail="请从顶部工作区选择器切换到店铺工作区。" />
+          </CardContent>
+        </Card>
+      )
+    }
+    return (
+      <div className="flex flex-col gap-4">
+        {isLoading ? <StatusBlock title="正在加载" detail="正在读取店铺数据。" /> : null}
+        {errorMessage ? (
+          <div className="flex flex-col gap-3 rounded-md border p-3">
+            <p className="text-sm font-medium">数据加载失败</p>
+            <p className="text-xs text-muted-foreground">{errorMessage}</p>
+            <Button variant="outline" size="sm" className="w-fit" onClick={loadTenantWorkspace}>
+              重新加载
+            </Button>
+          </div>
+        ) : null}
+        {view === "总览" && overview ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>概览</CardTitle>
+              <CardDescription>商品、订单、支付与供货摘要。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              <CloneBotOverviewContent overview={overview} />
+            </CardContent>
+          </Card>
+        ) : null}
+        {view === "克隆Bot" ? (
+          <>
+            {renderStoreSettingsForm()}
+            {renderPaymentSettings()}
+            {products && orders ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>商品与订单</CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-4">
+                  <CloneBotRecentLists
+                    products={products}
+                    orders={orders}
+                    productFilters={productFilters}
+                    orderFilters={orderFilters}
+                    isRefreshing={isLoading}
+                    actionId={supplyActionId}
+                    actionResult={supplyActionResult}
+                    selectedOrderDiagnostics={selectedOrderDiagnostics}
+                    orderDiagnosticsActionId={orderDiagnosticsActionId}
+                    orderDiagnosticsError={orderDiagnosticsError}
+                    orderObservability={orderObservability}
+                    orderObservabilityLoading={orderObservabilityLoading}
+                    orderObservabilityError={orderObservabilityError}
+                    orderObservabilityOutTradeNo={orderObservabilityOutTradeNo}
+                    onCreateProduct={handleCreateProduct}
+                    onUpdateProductMetadata={handleUpdateProductMetadata}
+                    onUpdateProductSales={handleUpdateProductSales}
+                    onBatchUpdateProductStatus={handleBatchUpdateProductStatus}
+                    onImportProductInventory={handleImportProductInventory}
+                    onUploadProductDeliveryFile={handleUploadProductDeliveryFile}
+                    onLoadOrderDiagnostics={handleLoadOrderDiagnostics}
+                    onLoadOrderObservabilityForOrder={handleLoadOrderObservabilityForOrder}
+                    onApplyProductFilters={handleApplyProductFilters}
+                    onApplyOrderFilters={handleApplyOrderFilters}
+                    onProductPageChange={handleProductPageChange}
+                    onOrderPageChange={handleOrderPageChange}
+                    onRefreshOrderObservability={loadTenantOrderObservability}
+                    onClearOrderObservabilityScope={handleClearOrderObservabilityScope}
+                    onRefresh={loadTenantWorkspace}
+                  />
+                </CardContent>
+              </Card>
+            ) : null}
+            {supplyDashboard ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>供货市场</CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-4">
+                  <SupplyDashboardPanel
+                    dashboard={supplyDashboard}
+                    currentWorkspace={currentWorkspace}
+                    actionId={supplyActionId}
+                    actionResult={supplyActionResult}
+                    onSupplyApply={handleSupplyApply}
+                    onReviewSupplierApplication={handleReviewSupplierApplication}
+                    onCreateSupplierOffer={handleCreateSupplierOffer}
+                    onSetSupplierOfferApproval={handleSetSupplierOfferApproval}
+                    onSetSupplierRule={handleSetSupplierRule}
+                    onCreateResellerProduct={handleCreateResellerProduct}
+                    onUpdateResellerProductMetadata={handleUpdateResellerProductMetadata}
+                    onUpdateResellerProductSales={handleUpdateResellerProductSales}
+                    marketFilters={supplyMarketFilters}
+                    onApplyMarketFilters={handleApplySupplyMarketFilters}
+                    products={products?.items ?? []}
+                  />
+                </CardContent>
+              </Card>
+            ) : null}
+          </>
+        ) : null}
+        {view === "商户结算" ? (
+          <CloneBotSubscriptionFinancePanel
+            overview={overview}
+            currentWorkspace={currentWorkspace}
+            subscriptionDashboard={subscriptionDashboard}
+            financeDashboard={financeDashboard}
+            isRefreshing={isLoading || subscriptionFinanceLoading}
+            errorMessage={subscriptionFinanceError}
+            actionId={subscriptionActionId}
+            actionResult={subscriptionActionResult}
+            renewalOrder={subscriptionRenewalOrder}
+            financeActionId={financeActionId}
+            financeActionResult={financeActionResult}
+            onCreateRenewalOrder={handleCreateSubscriptionRenewalOrder}
+            onCreateWithdrawal={handleCreateWithdrawal}
+            onRefresh={loadSubscriptionFinance}
+          />
+        ) : null}
+        {view === "系统设置" ? (
+          <>
+            {renderStoreSettingsForm()}
+            {renderPaymentSettings()}
+            <CloneBotApiKeysPanel
+              currentWorkspace={currentWorkspace}
+              apiKeys={tenantApiKeys}
+              createdApiKey={createdTenantApiKey}
+              isRefreshing={tenantApiKeysLoading}
+              errorMessage={tenantApiKeysError}
+              actionId={tenantApiKeyActionId}
+              actionResult={tenantApiKeyActionResult}
+              onCreateApiKey={handleCreateTenantApiKey}
+              onRevokeApiKey={handleRevokeTenantApiKey}
+              onDismissCreatedApiKey={() => setCreatedTenantApiKey(null)}
+              onRefresh={handleRefreshTenantApiKeys}
+            />
+          </>
+        ) : null}
+      </div>
+    )
+  }
 
   return (
     <div className="grid gap-4 lg:grid-cols-3">
@@ -8159,6 +8443,7 @@ export function AdminShell() {
   const [isBindingCodeSubmitting, setIsBindingCodeSubmitting] = React.useState(false)
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null)
   const [bindingCodeError, setBindingCodeError] = React.useState<string | null>(null)
+  const [activeView, setActiveView] = React.useState<AdminView>("Bot工作台")
 
   const loadSession = React.useCallback(async () => {
     setIsLoading(true)
@@ -8216,6 +8501,7 @@ export function AdminShell() {
     try {
       const nextSession = await selectAdminWebWorkspace(workspaceId)
       setSession(nextSession)
+      setActiveView("Bot工作台")
     } catch (error) {
       setErrorMessage(errorToMessage(error))
     } finally {
@@ -8254,7 +8540,11 @@ export function AdminShell() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="flex min-h-screen">
-        <Sidebar currentWorkspace={currentWorkspace} />
+        <Sidebar
+          currentWorkspace={currentWorkspace}
+          activeView={activeView}
+          onViewChange={setActiveView}
+        />
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="border-b bg-background">
             <div className="flex min-h-16 flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6">
@@ -8285,7 +8575,7 @@ export function AdminShell() {
 
           <main className="flex-1">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6 lg:p-8">
-              <MobileNav />
+              <MobileNav activeView={activeView} onViewChange={setActiveView} />
 
               {errorMessage ? <ErrorCard message={errorMessage} onRetry={loadSession} /> : null}
 
@@ -8306,10 +8596,10 @@ export function AdminShell() {
                       : "管理后台"}
                   </Badge>
                   <h1 className="text-2xl font-semibold md:text-3xl">
-                    Bot 管理台
+                    {viewTitles[activeView].title}
                   </h1>
                   <p className="text-sm text-muted-foreground">
-                    主 Bot、克隆 Bot、供应商与代理商入口。
+                    {viewTitles[activeView].description}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -8326,27 +8616,47 @@ export function AdminShell() {
 
               <SummaryGrid items={summaryItems} />
 
-              <Tabs defaultValue="primary" className="flex flex-col gap-4">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <TabsList>
-                    <TabsTrigger value="primary">主 Bot</TabsTrigger>
-                    <TabsTrigger value="clone">克隆 Bot</TabsTrigger>
-                  </TabsList>
-                  <Badge variant="secondary" className="w-fit">
-                    工作区隔离
-                  </Badge>
-                </div>
-                <TabsContent value="primary">
-                  <PrimaryBotPanel
-                    platformWorkspace={platformWorkspace}
-                    user={session?.user}
-                    workspaces={workspaces}
-                  />
-                </TabsContent>
-                <TabsContent value="clone">
-                  <CloneBotPanel currentWorkspace={currentWorkspace} />
-                </TabsContent>
-              </Tabs>
+              {activeView === "Bot工作台" ? (
+                <Tabs defaultValue="primary" className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <TabsList>
+                      <TabsTrigger value="primary">主 Bot</TabsTrigger>
+                      <TabsTrigger value="clone">克隆 Bot</TabsTrigger>
+                    </TabsList>
+                    <Badge variant="secondary" className="w-fit">
+                      工作区隔离
+                    </Badge>
+                  </div>
+                  <TabsContent value="primary">
+                    <PrimaryBotPanel
+                      platformWorkspace={platformWorkspace}
+                      user={session?.user}
+                      workspaces={workspaces}
+                    />
+                  </TabsContent>
+                  <TabsContent value="clone">
+                    <CloneBotPanel currentWorkspace={currentWorkspace} />
+                  </TabsContent>
+                </Tabs>
+              ) : currentWorkspace?.kind === "platform" ? (
+                <PrimaryBotPanel
+                  platformWorkspace={platformWorkspace}
+                  user={session?.user}
+                  workspaces={workspaces}
+                  view={activeView}
+                />
+              ) : currentWorkspace?.kind === "tenant" ? (
+                <CloneBotPanel currentWorkspace={currentWorkspace} view={activeView} />
+              ) : (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>请先选择工作区</CardTitle>
+                    <CardDescription>
+                      从顶部工作区选择器切换到平台或店铺工作区后再查看该页面。
+                    </CardDescription>
+                  </CardHeader>
+                </Card>
+              )}
 
               <PartnerEntrances currentWorkspace={currentWorkspace} />
             </div>

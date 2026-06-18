@@ -47,3 +47,7 @@ storage/
 .vscode/
 .idea/
 .DS_Store
+
+# 保留前端构建产物进镜像（web/admin/dist 被 dist/ 排除，此处取消）
+!web/admin/dist/
+!web/admin/dist/**
