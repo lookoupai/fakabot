@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     order_expire_interval_seconds: int = 60
     inventory_unlock_interval_seconds: int = 60
     payment_reconcile_interval_seconds: int = 300
+    payment_retry_interval_seconds: int = 300
     external_fulfillment_interval_seconds: int = 120
     delivery_dispatch_interval_seconds: int = 30
     delivery_sending_timeout_seconds: int = 300

@@ -1,7 +1,10 @@
 import logging
+from pathlib import Path
 
 import redis.asyncio as redis
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.bots.dispatcher import create_dispatcher
 from app.config import get_settings
@@ -46,6 +49,23 @@ def create_app() -> FastAPI:
     application.include_router(create_platform_admin_router(settings))
     application.include_router(create_admin_web_router(settings))
     install_openapi_security(application)
+
+    # 挂载管理后台前端（单页应用，构建产物在 web/admin/dist）。
+    # 前端不使用 react-router，仅需 index.html + /assets 静态资源。
+    admin_dist = Path(__file__).resolve().parent.parent / "web" / "admin" / "dist"
+    if admin_dist.is_dir() and (admin_dist / "index.html").exists():
+        assets_dir = admin_dist / "assets"
+        if assets_dir.is_dir():
+            application.mount(
+                "/assets",
+                StaticFiles(directory=str(assets_dir)),
+                name="admin-assets",
+            )
+
+        @application.get("/admin", include_in_schema=False)
+        @application.get("/admin/{full_path:path}", include_in_schema=False)
+        async def _admin_spa(full_path: str = "") -> FileResponse:
+            return FileResponse(str(admin_dist / "index.html"))
 
     @application.on_event("startup")
     async def startup() -> None:

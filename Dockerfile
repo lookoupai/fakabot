@@ -25,12 +25,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 创建非 root 用户并准备数据目录
-RUN useradd -m -u 10001 appuser \
-    && mkdir -p /app/data /app/storage \
-    && chown -R appuser:appuser /app
+# 准备数据目录（storage 由 docker-compose 以宿主 root 权限挂载，
+# 因此容器与 compose 统一以 root 运行，避免卷写入权限问题）
+RUN mkdir -p /app/data /app/storage
 
-USER appuser
+# 启动前自动执行数据库迁移的入口脚本
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 58001
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "58001"]

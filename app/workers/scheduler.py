@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, List
+from typing import Awaitable, Callable, Dict, List
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -14,6 +14,7 @@ from app.workers.inventory_unlock import release_expired_inventory_locks_once
 from app.workers.ledger_settlement import release_available_settlements_once
 from app.workers.order_expire import expire_pending_orders_once
 from app.workers.payment_reconcile import reconcile_pending_payments_once
+from app.workers.payment_retry import retry_failed_payment_callbacks_once
 from app.workers.subscription_lifecycle import process_subscription_lifecycle_once
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,14 @@ class BackgroundWorkerManager:
                 ),
                 name="fakabot:subscription_lifecycle",
             ),
+            asyncio.create_task(
+                self._run_loop(
+                    name="payment_retry",
+                    interval_seconds=self._settings.payment_retry_interval_seconds,
+                    runner=self._retry_failed_payment_callbacks,
+                ),
+                name="fakabot:payment_retry",
+            ),
         ]
         logger.info("后台 worker 已启动")
 
@@ -104,6 +113,18 @@ class BackgroundWorkerManager:
         if not self._settings.workers_enabled:
             return True
         return bool(self._tasks) and all(not task.done() for task in self._tasks)
+
+    def task_status(self) -> Dict[str, str]:
+        """返回每个后台任务的存活状态，供健康检查展示。"""
+        if not self._settings.workers_enabled:
+            return {"status": "disabled"}
+        status: Dict[str, str] = {}
+        for task in self._tasks:
+            name = task.get_name()
+            if name.startswith("fakabot:"):
+                name = name[len("fakabot:"):]
+            status[name] = "done" if task.done() else "running"
+        return status
 
     async def stop(self) -> None:
         if not self._tasks:
@@ -182,4 +203,11 @@ class BackgroundWorkerManager:
             self._settings,
             self._session_factory,
             limit=self._settings.worker_batch_limit,
+        )
+
+    async def _retry_failed_payment_callbacks(self) -> int:
+        # 每条回调使用独立事务，这里使用 once 函数内置的小批量上限（20）
+        return await retry_failed_payment_callbacks_once(
+            self._settings,
+            self._session_factory,
         )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -23,6 +23,13 @@ async def ready(request: Request) -> Dict[str, str]:
     try:
         async with session_factory() as session:
             await session.execute(text("SELECT 1"))
+            # 仅 SELECT 1 只能证明连接可用，空库也会通过（曾因此假阳性 30 小时）。
+            # 这里额外验证核心业务表已迁移就绪。
+            migrated = await session.execute(text("SELECT to_regclass('public.tenants')"))
+            if migrated.scalar() is None:
+                raise HTTPException(status_code=503, detail="database_not_migrated")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail="database_unavailable") from exc
     if request.app.state.redis is None:
@@ -77,11 +84,26 @@ async def detailed_health(request: Request) -> JSONResponse:
             checks["redis"] = {"status": "unhealthy", "message": str(e)}
             all_healthy = False
 
-    # 3. Worker 心跳检查
-    workers_status = await _check_workers_heartbeat(redis_client)
-    checks["workers"] = workers_status
-    if workers_status["status"] != "healthy":
-        all_healthy = False
+    # 3. 后台任务检查（内置 BackgroundWorkerManager）
+    settings = getattr(request.app.state, "settings", None)
+    workers_enabled = bool(getattr(settings, "workers_enabled", False))
+    worker_manager = getattr(request.app.state, "worker_manager", None)
+    if not workers_enabled:
+        checks["workers"] = {"status": "healthy", "message": "workers disabled", "tasks": {}}
+    else:
+        is_ready = worker_manager is not None and callable(
+            getattr(worker_manager, "is_ready", None)
+        ) and worker_manager.is_ready()
+        task_status: Dict[str, Any] = {}
+        if worker_manager is not None and hasattr(worker_manager, "task_status"):
+            task_status = worker_manager.task_status()
+        checks["workers"] = {
+            "status": "healthy" if is_ready else "unhealthy",
+            "message": "ready" if is_ready else "worker tasks not running",
+            "tasks": task_status,
+        }
+        if not is_ready:
+            all_healthy = False
 
     # 4. 存储目录检查
     try:
@@ -110,66 +132,3 @@ async def detailed_health(request: Request) -> JSONResponse:
         }
     )
 
-
-async def _check_workers_heartbeat(redis_client) -> Dict[str, Any]:
-    """检查 Worker 心跳状态"""
-    if redis_client is None:
-        return {
-            "status": "unknown",
-            "message": "redis not available",
-            "workers": {}
-        }
-
-    worker_names = ["report-worker", "subscription-worker", "payment-retry-worker"]
-    workers_info = {}
-    any_unhealthy = False
-
-    for worker_name in worker_names:
-        heartbeat_key = f"worker:{worker_name}:heartbeat"
-        try:
-            heartbeat = await redis_client.get(heartbeat_key)
-            if heartbeat:
-                # 解析心跳时间
-                try:
-                    heartbeat_time = datetime.fromisoformat(heartbeat.decode() if isinstance(heartbeat, bytes) else heartbeat)
-                    age_seconds = (datetime.now(timezone.utc) - heartbeat_time).total_seconds()
-
-                    # 判断是否健康（5分钟内有心跳）
-                    if age_seconds < 300:
-                        workers_info[worker_name] = {
-                            "status": "healthy",
-                            "last_heartbeat": heartbeat_time.isoformat(),
-                            "age_seconds": int(age_seconds)
-                        }
-                    else:
-                        workers_info[worker_name] = {
-                            "status": "stale",
-                            "last_heartbeat": heartbeat_time.isoformat(),
-                            "age_seconds": int(age_seconds)
-                        }
-                        any_unhealthy = True
-                except (ValueError, AttributeError):
-                    workers_info[worker_name] = {
-                        "status": "unknown",
-                        "message": "invalid heartbeat format"
-                    }
-                    any_unhealthy = True
-            else:
-                workers_info[worker_name] = {
-                    "status": "missing",
-                    "message": "no heartbeat found"
-                }
-                any_unhealthy = True
-        except Exception as e:
-            workers_info[worker_name] = {
-                "status": "error",
-                "message": str(e)
-            }
-            any_unhealthy = True
-
-    overall_status = "unhealthy" if any_unhealthy else "healthy"
-
-    return {
-        "status": overall_status,
-        "workers": workers_info
-    }
